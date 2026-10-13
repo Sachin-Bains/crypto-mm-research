@@ -1,0 +1,38 @@
+# Recorder configuration. All times in UTC on disk.
+
+[storage]
+root = "data"            # raw files go to data/raw/<venue>/<date>/<hour>.ndjson.zst
+flush_seconds = 2.0      # max data lost on a crash or power cut
+zstd_level = 3
+
+[clock]
+every_seconds = 60       # REST server-time samples per venue, for clock offset and latency
+
+[symbols]
+binance = ["BTCUSDT", "ETHUSDT"]
+bybit   = ["BTCUSDT", "ETHUSDT"]
+okx     = ["BTC-USDT-SWAP", "ETH-USDT-SWAP"]
+
+[binance]
+enabled = true
+public_url = "wss://fstream.binance.com/public/stream"   # depth, bookTicker
+market_url = "wss://fstream.binance.com/market/stream"   # aggTrade, markPrice, forceOrder
+rest_url = "https://fapi.binance.com"
+depth_speed = "100ms"
+book_ticker = true
+snapshot_limit = 1000
+snapshot_every_minutes = 30
+
+[bybit]
+enabled = true
+url = "wss://stream.bybit.com/v5/public/linear"
+rest_url = "https://api.bybit.com"
+depth = 200                  # 200 levels, pushed every 100 ms
+resync_every_minutes = 60
+
+[okx]
+enabled = true
+url = "wss://ws.okx.com:8443/ws/v5/public"
+rest_url = "https://www.okx.com"
+book_channel = "books"       # 400 levels, pushed every 100 ms, no login needed
+resync_every_minutes = 60

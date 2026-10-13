@@ -1,0 +1,4 @@
+aiohttp>=3.9
+orjson>=3.9
+zstandard>=0.22
+pytest>=8.0
