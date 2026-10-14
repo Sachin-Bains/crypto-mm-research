@@ -11,7 +11,7 @@ This repository grows layer by layer:
    - C++ port of the simulator core, checked against the Python version.
 3. **Forecasting**, in progress:
    - **Features and walk-forward evaluation** (done).
-   - Conformal prediction intervals, tested under distribution shift.
+   - **Conformal prediction intervals under distribution shift** (done).
 4. Uncertainty-aware market maker, evaluated with PnL attribution and markouts.
 5. Interactive results explorer and research note.
 
@@ -121,6 +121,30 @@ Tests in `tests/test_sim.py` are small enough to check on paper: queue arithmeti
 - signal recovery: in a synthetic market where Binance follows OKX by 2 s, the OKX feature and the out-of-sample model must find it
 - negative control: in a pure random walk, out-of-sample skill must be about zero
 - order flow imbalance against a hand-worked example
+
+---
+
+## Layer 3b: intervals that hold when the market shifts
+
+`python -m forecast.intervals --dates 2026-10-14` wraps every out-of-sample forecast in a 90% interval using five methods and checks whether each really contains the outcome 90% of the time: overall, in calm and stressed markets, in the most volatile 5% of moments, and in every 10-minute window.
+
+| Method | How it calibrates |
+|---|---|
+| static | split conformal on the first hour of out-of-sample residuals, then frozen |
+| rolling | recalibrated every second on the trailing 10 minutes |
+| scaled | as rolling, on residuals divided by recent volatility, so intervals widen and narrow with the market |
+| regime | scaled, calibrated separately in calm, normal and stressed volatility terciles (Mondrian conformal) |
+| adaptive | adaptive conformal inference (Gibbs and Candès, 2021): the working miscoverage level is nudged after every update, alpha_t+1 = alpha_t + gamma (alpha - recent miss rate) |
+
+**Label delay.** A 30-second forecast cannot be scored until 30 seconds later. Every calibration set at time u uses only rows whose outcomes had arrived by u, and the adaptive update counts only misses already known. Quantiles use the finite-sample rank ceil((n + 1)(1 - alpha)).
+
+**Origin.** The scaled and regime methods carry over two ideas from my MSc work on turbulence surrogates: absolute versus scaled conformal intervals, and calibrating separately per flow region. Markets add what the turbulence data never had: a distribution that shifts while the model is running.
+
+**Tests** (`tests/test_conformal.py`), on synthetic residuals with known answers:
+- with nothing changing, every method covers 90% (within 2%)
+- noise quadruples and volatility shows it: static collapses below 50%; scaled, regime and adaptive stay at 90%
+- noise triples but volatility does not show it (an unobserved shift): in minutes 1 to 3 after the shift, scaled covers about 56% while adaptive is back to about 92%; the window methods only recover after about 10 minutes; static never does
+- no look-ahead: changing outcomes that arrive after time T changes no interval set before T
 
 ---
 

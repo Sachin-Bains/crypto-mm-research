@@ -166,7 +166,7 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     tag = f"{days[0]}_{days[-1]}"
     (out / f"forecast_{tag}.json").write_text(json.dumps(report, indent=2))
-    cols = {"recv_ns": d["recv_ns"], "mid": d["mid"]}
+    cols = {"recv_ns": d["recv_ns"], "mid": d["mid"], "rv_30s": d["rv_30s"], "spread_bps": d["spread_bps"]}
     cols.update({tg: d[tg] for tg in TARGETS})
     cols.update({f"pred_{n}_{tg}": p.astype(np.float32) for (n, tg), p in preds.items()})
     pq.write_table(pa.table(cols), out / f"forecast_oos_{tag}.parquet", compression="zstd")
