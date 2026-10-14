@@ -301,9 +301,10 @@ def okx_checksum(book: L2Book) -> int:
 class OkxRebuild(_Venue):
     """Snapshot on subscribe, then updates where prevSeqId must equal the previous seqId.
 
-    The exchange checksum is verified after every message and reported as a
-    match rate. It does not invalidate the book: the rule is implemented from
-    the documented description and is confirmed or refuted by that rate.
+    The exchange checksum is verified after every message when present and
+    reported as a match rate. Live data from October 2026 showed the public
+    books channel sending 0 on every message, so OKX books are validated by
+    sequence continuity alone.
     """
 
     name = "okx"
@@ -342,7 +343,9 @@ class OkxRebuild(_Venue):
                     self.out[s].invalidate(recv, "disconnect")
 
     def _verify(self, sym: str, expected) -> None:
-        if expected is None:
+        # OKX's public books channel currently sends 0 on every message: no checksum to verify.
+        if expected is None or int(expected) == 0:
+            self.bump(sym, "checksum_not_provided")
             return
         self.bump(sym, "checksums")
         if okx_checksum(self.books[sym]) == int(expected):

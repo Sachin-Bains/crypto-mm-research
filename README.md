@@ -7,7 +7,8 @@ This repository grows layer by layer:
 1. **Recorder**: raw order book, trade, mark price, funding and liquidation data for BTC and ETH perpetuals on Binance, Bybit and OKX.
 2. **Simulator**, in progress:
    - **Book rebuild** (done): validated order books and normalised trades from the raw data.
-   - Fill model with queue position, latency and fees.
+   - **Fill simulator** (done, Python reference version): queue position, latency, fees, markouts.
+   - C++ port of the simulator core, checked against the Python version.
 3. Short-horizon forecasts with conformal prediction intervals, tested under distribution shift.
 4. Uncertainty-aware market maker, evaluated with PnL attribution and markouts.
 5. Interactive results explorer and research note.
@@ -68,12 +69,36 @@ All sizes are in coins (OKX contract sizes are converted using the contract valu
 
 - **Binance**: synced with the documented procedure (REST snapshot, then events from the one containing `lastUpdateId`, then `pu` must equal the previous `u`). Every later REST snapshot is replayed forward through the same events and compared with the live book's top 20 levels. Because depth quantities are absolute, the two must match exactly. The report gives the match rate.
 - **Bybit**: snapshot then deltas, with `u` required to advance by exactly one (measured on live data, not documented). A break invalidates the book until the next snapshot.
-- **OKX**: `prevSeqId` must equal the previous `seqId`. The exchange's CRC32 checksum over the top 25 levels is also verified after every message and reported as a match rate.
+- **OKX**: `prevSeqId` must equal the previous `seqId`. OKX documents a CRC32 checksum over the top 25 levels, but live data in October 2026 showed the public `books` channel sending `0` on every message, so OKX books are validated by sequence continuity alone. Binance books carry the stronger guarantee (exact match against exchange snapshots).
 - **All venues**: disconnects and stale feeds invalidate the book; crossed books after an update are counted.
 
 A book is only written while it can be trusted. Each day file opens with a full reset, so any single day replays on its own. Processing starts two hours before the requested window so books are already in sync when it begins.
 
 The tests generate a random true order book, encode it in each exchange's exact message format (including late REST snapshots, a dropped message, a disconnect and a midnight crossing), rebuild it, replay the output and compare it with the true book after every message.
+
+---
+
+## Layer 2b: fill simulator
+
+`python -m sim --date 2026-10-14` replays one day of a rebuilt book and runs a strategy against it, for every combination of fill model and latency.
+
+**Clock and latency.** Everything runs on the exchange's clock. The strategy sees each book update `latency` after it happened, its orders and cancels reach the exchange `latency` after it sends them, and it hears about fills `latency` after they happen. Three settings: 150 ms (measured, recording from Glasgow), 10 ms (a server near the exchange) and 1 ms (colocated). A cancel can lose the race to a trade, exactly as it can live.
+
+**Fill models** for a resting order at price P:
+
+| Model | Filled when |
+|---|---|
+| pessimistic | the market trades through P, or the book crosses it |
+| queue | the order joins behind the visible size at P. Trades at P consume the queue ahead first. When the level shrinks, traded volume is subtracted first (book updates already include trades, so counting them again would advance the order twice) and only the remainder counts as cancels, split between ahead and behind in proportion to ahead^n : behind^n (n = 1 by default) |
+| optimistic | any trade at P, as if at the front of the queue |
+
+Our orders are virtual and assumed small relative to the queues. Orders that would trade immediately are rejected (post-only). Orders are pulled while the book is invalid.
+
+**Outputs** per run: fills, fill rate, time in queue, PnL before fees split into spread captured and inventory, markouts and adverse selection at 1, 5 and 30 seconds, and net PnL under three fee tiers (retail 2 bp, top VIP 0 bp, an illustrative -0.5 bp rebate).
+
+The baseline strategy (`JoinQuoter`) quotes a fixed size at the best bid and ask and re-quotes whenever they move. It has no view on direction, so whatever it loses to informed traders shows up directly in the markouts. It is the benchmark the Layer 4 strategies must beat.
+
+Tests in `tests/test_sim.py` are small enough to check on paper: queue arithmetic after trades and cancels, the double-counting trap, cancel splitting, model ranking, a cancel losing a race to a trade at 10 ms but winning at 1 ms, post-only rejection, invalid books, and the PnL split.
 
 ---
 
@@ -138,4 +163,13 @@ Expected volume is roughly 3 GB per day compressed for all three venues.
 .venv\Scripts\python -m rebuild --start 2026-10-14
 ```
 
-Prints a quality report per venue and symbol (time in sync, resets, gaps, Binance snapshot cross-checks, OKX checksum match rate) and saves it to `data\clean\reports`. A full day takes roughly 20 to 30 minutes.
+Prints a quality report per venue and symbol (time in sync, resets, gaps, Binance snapshot cross-checks) and saves it to `data\clean\reports`. A full day takes roughly 20 to 30 minutes.
+
+### 6. Run the simulator
+
+```powershell
+.venv\Scripts\python -m sim --date 2026-10-14
+.venv\Scripts\python -m sim --date 2026-10-14 --hours 2      # quick run on the first 2 hours
+```
+
+Runs the baseline quoter on Binance BTCUSDT for all three fill models and all three latencies, prints a summary table and saves full results to `data\results`. A full day takes roughly 10 minutes.

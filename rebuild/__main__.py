@@ -80,6 +80,8 @@ def print_report(report: dict) -> None:
                 if s.get(key):
                     ok = s.get(f"{key}_matched", 0)
                     print(f"  {key.replace('_', ' '):<16} {ok}/{s[key]} matched ({ok / s[key]:.2%})")
+            if s.get("checksum_not_provided"):
+                print(f"  checksum         not provided by the exchange ({s['checksum_not_provided']} messages)")
             other = {k: v for k, v in s.items() if k.endswith(("breaks", "skipped", "stale_snapshots", "failed"))}
             if other:
                 print("  " + "  ".join(f"{k} {v}" for k, v in other.items()))
