@@ -46,18 +46,23 @@ def main() -> None:
     ap.add_argument("--size", type=float, default=0.01)
     ap.add_argument("--max-pos", type=float, default=0.05)
     ap.add_argument("--queue-power", type=float, default=1.0)
+    ap.add_argument("--no-bbo", action="store_true", help="drive the strategy from the 100 ms depth stream only")
     args = ap.parse_args()
 
-    md = load_day(args.clean, args.venue, args.symbol, args.date)
+    md = load_day(args.clean, args.venue, args.symbol, args.date, use_bbo=not args.no_bbo)
     if args.hours:
         md = md.clip_hours(args.hours)
-    print(f"{args.venue} {args.symbol} {args.date}: {len(md.g_start):,} book messages, {len(md.t_exch):,} trades")
+    feed = "real-time best bid/offer" if md.has_bbo else "100 ms depth stream"
+    print(f"{args.venue} {args.symbol} {args.date}: {len(md.g_start):,} book messages, {len(md.t_exch):,} trades, "
+          f"{len(md.b_exch):,} best-price changes")
+    print(f"Strategy driven by: {feed}")
 
     rows = []
     for lat in [float(x) for x in args.latency_ms.split(",")]:
         for model in args.models.split(","):
             t0 = time.time()
-            res = Engine(md, JoinQuoter(args.size, args.max_pos), int(lat * 1e6), model, args.queue_power).run()
+            res = Engine(md, JoinQuoter(args.size, args.max_pos), int(lat * 1e6), model, args.queue_power,
+                         use_bbo=not args.no_bbo).run()
             row = summarise(res)
             rows.append(row)
             print(f"  {model:<12} {lat:>6g} ms  {row['fills']:>6} fills  ({time.time() - t0:.0f}s)")
@@ -69,7 +74,8 @@ def main() -> None:
 
     out = Path("data/results")
     out.mkdir(parents=True, exist_ok=True)
-    path = out / f"sim_{args.venue}_{args.symbol}_{args.date}{'_' + str(args.hours) + 'h' if args.hours else ''}.json"
+    tag = ("_" + str(args.hours) + "h" if args.hours else "") + ("_depthonly" if args.no_bbo else "")
+    path = out / f"sim_{args.venue}_{args.symbol}_{args.date}{tag}.json"
     path.write_text(json.dumps({"args": vars(args), "results": rows}, indent=2))
     print(f"\nFull results (fees, markouts at all horizons, PnL split) saved to {path}")
 

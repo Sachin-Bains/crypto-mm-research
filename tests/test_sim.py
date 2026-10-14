@@ -27,6 +27,7 @@ class Script:
     def __init__(self) -> None:
         self.d = []      # (exch, msg, kind, side, price, qty)
         self.t = []      # (exch, price, qty, side)
+        self.b = []      # (exch, bid, bid_qty, ask, ask_qty)
         self.msg = 0
 
     def reset(self, ms, bids, asks):
@@ -53,13 +54,19 @@ class Script:
         self.t.append((ms * MS, price, qty, aggressor))
         return self
 
+    def bbo(self, ms, bid, bid_qty, ask, ask_qty):
+        self.b.append((ms * MS, bid, bid_qty, ask, ask_qty))
+        return self
+
     def data(self) -> MarketData:
         d = np.array(self.d, dtype=object) if self.d else np.zeros((0, 6))
         t = sorted(self.t)
         col = lambda rows, i: [r[i] for r in rows]  # noqa: E731
+        b = sorted(self.b)
+        bbo = [col(b, i) for i in range(5)] if b else None
         return MarketData.from_arrays(col(self.d, 0), col(self.d, 1), col(self.d, 2), col(self.d, 3),
                                       col(self.d, 4), col(self.d, 5),
-                                      col(t, 0), col(t, 1), col(t, 2), col(t, 3))
+                                      col(t, 0), col(t, 1), col(t, 2), col(t, 3), bbo=bbo)
 
 
 class OneOrder(Strategy):
@@ -232,3 +239,82 @@ def test_pnl_split_round_trip():
     assert out["adverse_1s_bps"] == pytest.approx(-0.075 / 100.0 * 1e4)
     assert out["markout_1s_bps"] == pytest.approx(-0.025 / 100.0 * 1e4)
     assert out["pnl_gross_usd"] == pytest.approx(out["spread_captured_usd"] + out["inventory_usd"])
+
+
+# --------------------------------------------------------------------------- real-time best bid and offer
+
+class Follower(Strategy):
+    """Keeps one bid at the best bid it can see; moves it whenever the best bid changes."""
+
+    def __init__(self):
+        self.live = None   # (oid, price)
+        self.fills = []
+
+    def on_book(self, t, bid, bq, ask, aq):
+        if self.live is not None and self.live[1] != bid:
+            self.api.cancel(self.live[0])
+            self.live = None
+        if self.live is None:
+            self.live = (self.api.place(BID, bid, 1.0), bid)
+
+    def on_fill(self, t, oid, side, price, qty, done):
+        self.fills.append(price)
+        if done and self.live and self.live[0] == oid:
+            self.live = None
+
+    def on_done(self, t, oid, reason):
+        if self.live and self.live[0] == oid:
+            self.live = None
+
+
+def stale_quote_market():
+    """Both quoters rest a bid at 100.0. At 1000 ms the real-time feed shows the best bid
+    dropping to 99.9: everyone else at 100.0 has pulled. At 1050 ms a seller arrives and
+    trades at 99.9, which means it would have hit anything still left at 100.0 first.
+    The 100 ms depth stream only shows the drop at 1100 ms."""
+    s = base()
+    s.bbo(0, 100.0, 5.0, 100.1, 5.0)
+    s.bbo(1000, 99.9, 3.0, 100.1, 5.0)
+    s.trade(1050, 99.9, 1.0, -1)
+    s.update(1100, (BID, 100.0, 0.0), (BID, 99.9, 2.0))
+    s.bbo(2000, 99.9, 2.0, 100.0, 1.0)
+    s.update(2000, (ASK, 100.0, 1.0))
+    return s
+
+
+def test_bbo_makes_latency_matter():
+    s = stale_quote_market()
+    # 1 ms: sees the drop at 1001, cancel lands at 1002, re-bids at 99.9 behind 3.0: no fill at 100.0
+    fast = Engine(s.data(), Follower(), 1 * MS, QUEUE).run()
+    # 150 ms: sees the drop at 1150, cancel lands at 1300: the 1050 ms seller hits the stale bid
+    slow = Engine(s.data(), Follower(), 150 * MS, QUEUE).run()
+    assert [f.price for f in fast.fills] == []
+    assert [(f.t_ns // MS, f.price) for f in slow.fills] == [(1050, 100.0)]
+    # and the same race is invisible without the real-time feed: both see the drop only at 1100
+    fast_d = Engine(s.data(), Follower(), 1 * MS, QUEUE, use_bbo=False).run()
+    assert [(f.t_ns // MS, f.price) for f in fast_d.fills] == [(1050, 100.0)]
+
+
+def test_bbo_cross_fills_at_exact_time():
+    s = base()
+    s.bbo(0, 100.0, 5.0, 100.1, 5.0)
+    s.bbo(50, 99.9, 3.0, 100.0, 1.0)            # best ask drops onto our 100.0 bid at 50 ms
+    s.update(100, (BID, 100.0, 0.0), (ASK, 100.0, 1.0), (ASK, 100.1, 5.0))
+    res = Engine(s.data(), OneOrder(BID, 100.0), 10 * MS, PESSIMISTIC).run()
+    assert len(res.fills) == 1 and res.fills[0].t_ns == 50 * MS   # not at the 100 ms depth update
+
+
+def test_bbo_size_sets_queue_position():
+    s = base()
+    s.bbo(0, 100.0, 5.0, 100.1, 5.0)
+    s.bbo(15, 100.0, 7.5, 100.1, 5.0)          # size at best bid grows before our order lands at 20 ms
+    s.update(100, (BID, 100.0, 7.5))
+    res = Engine(s.data(), OneOrder(BID, 100.0), 10 * MS, QUEUE).run()
+    # depth still says 5.0 at 20 ms, but the real-time feed says 7.5: we join behind 7.5
+    s2 = base()
+    s2.bbo(0, 100.0, 5.0, 100.1, 5.0)
+    s2.bbo(15, 100.0, 7.5, 100.1, 5.0)
+    s2.trade(50, 100.0, 7.75, -1)
+    s2.update(100, (BID, 100.0, 0.5))
+    res2 = Engine(s2.data(), OneOrder(BID, 100.0), 10 * MS, QUEUE).run()
+    assert res2.fills[0].ahead0 == 7.5 and res2.fills[0].qty == pytest.approx(0.25)

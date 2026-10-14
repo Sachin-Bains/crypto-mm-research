@@ -17,6 +17,14 @@ Fill models for a resting order at price P:
   optimistic   filled by any trade at P, as if at the front of the queue
 
 Trade-through and crossed-book fills apply in all three models.
+
+What the strategy sees: with real-time best bid and offer data (Binance
+bookTicker), the strategy is driven by every change in the best prices, the
+mid used for markouts comes from it, and a resting order is filled the moment
+the opposite best price reaches it. Without it, both come from the 100 ms
+depth stream, which hides any latency difference below 100 ms. Queue
+positions are always tracked on the depth stream, which is the only source
+of sizes below the top of the book.
 """
 
 from __future__ import annotations
@@ -110,10 +118,12 @@ class Result:
 
 class Engine:
     def __init__(self, md: MarketData, strategy: Strategy, latency_ns: int, model: str = QUEUE,
-                 queue_power: float = 1.0) -> None:
+                 queue_power: float = 1.0, use_bbo: bool = True) -> None:
         if model not in MODELS:
             raise ValueError(model)
         self.md, self.strategy, self.L, self.model, self.n = md, strategy, int(latency_ns), model, queue_power
+        self.use_bbo = use_bbo and md.has_bbo
+        self.bbo: tuple | None = None   # latest (bid, bid_qty, ask, ask_qty) from the real-time feed
         self.bids: SortedDict = SortedDict()
         self.asks: SortedDict = SortedDict()
         self.valid = False
@@ -131,14 +141,19 @@ class Engine:
 
     # Book helpers -----------------------------------------------------------
     def best_bid(self) -> float:
+        if self.bbo is not None:
+            return self.bbo[0]
         return self.bids.peekitem(-1)[0] if self.bids else -INF
 
     def best_ask(self) -> float:
+        if self.bbo is not None:
+            return self.bbo[2]
         return self.asks.peekitem(0)[0] if self.asks else INF
 
     def mid(self) -> float:
-        if self.bids and self.asks:
-            return 0.5 * (self.best_bid() + self.best_ask())
+        bb, ba = self.best_bid(), self.best_ask()
+        if bb > -INF and ba < INF:
+            return 0.5 * (bb + ba)
         return math.nan
 
     def level_qty(self, side: int, price: float) -> float:
@@ -179,8 +194,7 @@ class Engine:
             self.live.pop(o.oid, None)
         self.schedule(t + self.L, "report_fill", (o.oid, o.side, o.price, x, done))
 
-    def _check_cross(self, t: int) -> None:
-        bb, ba = self.best_bid(), self.best_ask()
+    def _check_cross(self, t: int, bb: float, ba: float) -> None:
         for o in list(self.live.values()):
             if (o.side == BID and o.price >= ba) or (o.side == ASK and o.price <= bb):
                 self._fill(o, o.rem, t)
@@ -225,6 +239,7 @@ class Engine:
         kind = md.d_kind[k0]
         if kind == 2:
             self.valid = False
+            self.bbo = None
             self.traded.clear()
             self._cancel_all(t, "invalid")
             self._last_top = None
@@ -274,15 +289,30 @@ class Engine:
 
         if not self.valid:
             return
-        self._check_cross(t)
-        m = self.mid()
-        if not math.isnan(m):
-            self._mid_t.append(t)
-            self._mid_v.append(m)
-        top = (self.best_bid(), self.bids.get(self.best_bid(), 0.0), self.best_ask(), self.asks.get(self.best_ask(), 0.0))
-        if top != self._last_top and bids and asks:
+        if not (bids and asks):
+            return
+        dbb, dba = bids.peekitem(-1)[0], asks.peekitem(0)[0]
+        self._check_cross(t, dbb, dba)
+        if self.use_bbo:
+            return
+        self._mid_t.append(t)
+        self._mid_v.append(0.5 * (dbb + dba))
+        top = (dbb, bids[dbb], dba, asks[dba])
+        if top != self._last_top:
             self._last_top = top
             self.schedule(t + self.L, "book", top)
+
+    def _on_bbo(self, i: int) -> None:
+        if not self.valid:
+            return
+        md = self.md
+        t = int(md.b_exch[i])
+        top = (float(md.b_bid[i]), float(md.b_bid_qty[i]), float(md.b_ask[i]), float(md.b_ask_qty[i]))
+        self.bbo = top
+        self._check_cross(t, top[0], top[2])
+        self._mid_t.append(t)
+        self._mid_v.append(0.5 * (top[0] + top[2]))
+        self.schedule(t + self.L, "book", top)
 
     # Our order events -------------------------------------------------------
     def _on_place(self, t: int, o: Order) -> None:
@@ -292,7 +322,14 @@ class Engine:
             self.schedule(t + self.L, "report_done", (o.oid, "rejected"))
             return
         o.status, o.arrive_ns = "live", t
-        o.ahead = o.ahead0 = self.level_qty(o.side, o.price)
+        ahead = self.level_qty(o.side, o.price)
+        if self.bbo is not None:
+            # the real-time feed has the freshest size at the best price
+            if o.side == BID and o.price == self.bbo[0]:
+                ahead = self.bbo[1]
+            elif o.side == ASK and o.price == self.bbo[2]:
+                ahead = self.bbo[3]
+        o.ahead = o.ahead0 = ahead
         self.live[o.oid] = o
 
     def _on_cancel(self, t: int, oid: int) -> None:
@@ -305,26 +342,34 @@ class Engine:
     def run(self) -> Result:
         md = self.md
         G, T = len(md.g_start), len(md.t_exch)
-        gi = ti = 0
+        B = len(md.b_exch) if self.use_bbo else 0
+        gi = ti = bi = 0
         d_first = md.d_exch[md.g_start] if G else np.zeros(0, dtype=np.int64)
-        last_market = max(int(d_first[-1]) if G else 0, int(md.t_exch[-1]) if T else 0)
+        last_market = max(int(d_first[-1]) if G else 0, int(md.t_exch[-1]) if T else 0,
+                          int(md.b_exch[B - 1]) if B else 0)
         strat = self.strategy
         while True:
             t_d = d_first[gi] if gi < G else INF
             t_t = md.t_exch[ti] if ti < T else INF
+            t_b = md.b_exch[bi] if bi < B else INF
             t_i = self.heap[0][0] if self.heap else INF
-            if t_d == INF and t_t == INF and t_i == INF:
+            if t_d == INF and t_t == INF and t_b == INF and t_i == INF:
                 break
-            if t_t <= t_d and t_t <= t_i:
+            # same-time order: trades, then depth, then best bid/offer, then our own events
+            if t_t <= t_d and t_t <= t_b and t_t <= t_i:
                 self.now = int(t_t)
                 self._on_trade(ti)
                 ti += 1
-            elif t_d <= t_i:
+            elif t_d <= t_b and t_d <= t_i:
                 self.now = int(t_d)
                 self._on_depth(gi)
                 gi += 1
+            elif t_b <= t_i:
+                self.now = int(t_b)
+                self._on_bbo(bi)
+                bi += 1
             else:
-                if gi >= G and ti >= T and t_i > last_market:
+                if gi >= G and ti >= T and bi >= B and t_i > last_market:
                     break  # data finished; events after the last market time cannot be simulated
                 t, _, kind, x = heapq.heappop(self.heap)
                 self.now = t
