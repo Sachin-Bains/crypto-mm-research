@@ -4,12 +4,18 @@ One connection carries order book (snapshot then deltas), trades, tickers
 (mark, index, funding) and liquidations. Bybit only sends a fresh book
 snapshot on subscribe, so the recorder resubscribes the book topic on a timer
 to create regular resync points without dropping the trade stream.
+
+Bybit does not document the update id u as strictly incrementing, but live
+data showed it advancing by exactly one on every delta (1803 of 1803). A jump
+is therefore treated as a missed message: it is logged as a gap and the book
+is resubscribed for a fresh snapshot, at most once per symbol every 60 seconds.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 import orjson
 
@@ -18,6 +24,7 @@ from ..sequencing import BybitBookTracker
 
 log = logging.getLogger(__name__)
 VENUE = "bybit"
+MIN_RESUB_GAP_S = 60.0
 
 
 class BybitFeed(WsFeed):
@@ -30,6 +37,8 @@ class BybitFeed(WsFeed):
         self.depth = int(cfg.get("depth", 200))
         self.resync_every = float(cfg.get("resync_every_minutes", 60)) * 60
         self.book = BybitBookTracker()
+        self._last_resub: dict[str, float] = {}
+        self._pending: set[str] = set()
 
     def book_topic(self, sym: str) -> str:
         return f"orderbook.{self.depth}.{sym}"
@@ -54,20 +63,33 @@ class BybitFeed(WsFeed):
             self.book.snapshot(sym, u)
             self.stats.snapshots += 1
         elif self.book.delta(sym, u):
-            # Logged, not acted on: Bybit does not document u as strictly +1.
-            self.stats.extra["u_jumps"] = self.stats.extra.get("u_jumps", 0) + 1
+            self.gap(symbol=sym, kind="u_jump", u=u)
+            if time.monotonic() - self._last_resub.get(sym, -1e9) >= MIN_RESUB_GAP_S:
+                self._pending.add(sym)
         if self.book.deltas:
             self.stats.extra["u_step_one_share"] = round(self.book.step_one / self.book.deltas, 4)
 
+    async def _resubscribe(self, symbols: list[str]) -> None:
+        now = time.monotonic()
+        for s in symbols:
+            self._last_resub[s] = now
+        topics = [self.book_topic(s) for s in symbols]
+        await self.send_json({"op": "unsubscribe", "args": topics})
+        await asyncio.sleep(0.5)
+        await self.send_json({"op": "subscribe", "args": topics})
+        self.stats.resyncs += 1
+        self.event("resync", topics=topics)
+
     async def background(self, ws) -> None:
+        next_timer = time.monotonic() + self.resync_every
         while True:
-            await asyncio.sleep(self.resync_every)
-            topics = [self.book_topic(s) for s in self.symbols]
-            await self.send_json({"op": "unsubscribe", "args": topics})
-            await asyncio.sleep(0.5)
-            await self.send_json({"op": "subscribe", "args": topics})
-            self.stats.resyncs += 1
-            self.event("resync", topics=topics)
+            await asyncio.sleep(1.0)
+            if self._pending:
+                syms, self._pending = sorted(self._pending), set()
+                await self._resubscribe(syms)
+            if time.monotonic() >= next_timer:
+                next_timer += self.resync_every
+                await self._resubscribe(self.symbols)
 
 
 async def clock_and_meta(cfg: dict, symbols: list[str], session, writer, health, clock_every: float) -> None:

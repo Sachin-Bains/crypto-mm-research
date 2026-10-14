@@ -187,3 +187,49 @@ def test_stale_feed_reconnects(tmp_path):
         return hits
 
     assert len(asyncio.run(scenario())) >= 2
+
+
+def test_bybit_gap_triggers_resubscribe(tmp_path):
+    from recorder.venues.bybit import BybitFeed
+
+    def book(kind, u):
+        return orjson.dumps({"topic": "orderbook.200.BTCUSDT", "type": kind, "ts": 1,
+                             "data": {"s": "BTCUSDT", "b": [], "a": [], "u": u, "seq": 1}, "cts": 1}).decode()
+
+    async def scenario():
+        received = []
+
+        async def ws_handler(request):
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            await ws.receive()  # initial subscribe
+            await ws.send_str(book("snapshot", 100))
+            await ws.send_str(book("delta", 101))
+            await ws.send_str(book("delta", 105))  # jump: missed 102-104
+            async for msg in ws:
+                received.append(orjson.loads(msg.data))
+            return ws
+
+        app = web.Application()
+        app.router.add_get("/ws", ws_handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        writer, health = RawWriter(tmp_path), Health(tmp_path)
+        async with aiohttp.ClientSession() as session:
+            feed = BybitFeed({"url": f"ws://127.0.0.1:{port}/ws", "rest_url": "", "resync_every_minutes": 60},
+                             ["BTCUSDT"], session=session, writer=writer, health=health)
+            task = asyncio.create_task(feed.run())
+            await asyncio.sleep(2.5)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await runner.cleanup()
+        return feed, received
+
+    feed, received = asyncio.run(scenario())
+    ops = [m.get("op") for m in received]
+    assert feed.stats.gaps == 1
+    assert "unsubscribe" in ops and ops.count("subscribe") >= 1
+    assert feed.stats.resyncs == 1

@@ -4,8 +4,10 @@ Research stack for one question: **when the market's distribution shifts, does a
 
 This repository grows layer by layer:
 
-1. **Recorder** (this commit): raw order book, trade, mark price, funding and liquidation data for BTC and ETH perpetuals on Binance, Bybit and OKX.
-2. Fill simulator with queue position, latency and fees.
+1. **Recorder**: raw order book, trade, mark price, funding and liquidation data for BTC and ETH perpetuals on Binance, Bybit and OKX.
+2. **Simulator**, in progress:
+   - **Book rebuild** (done): validated order books and normalised trades from the raw data.
+   - Fill model with queue position, latency and fees.
 3. Short-horizon forecasts with conformal prediction intervals, tested under distribution shift.
 4. Uncertainty-aware market maker, evaluated with PnL attribution and markouts.
 5. Interactive results explorer and research note.
@@ -46,6 +48,32 @@ data/
   status.json                                   live counters per feed
   logs/recorder.log
 ```
+
+---
+
+## Layer 2a: book rebuild
+
+`python -m rebuild --start 2026-10-14 --end 2026-10-20` turns raw recordings into clean, replayable tables per venue, symbol and UTC day:
+
+| Table | Contents |
+|---|---|
+| `deltas` | The order book as a replayable stream: level updates, resets (full book rebuilt from a snapshot) and invalid markers (book cannot be trusted until the next reset) |
+| `top` | Best 10 levels after every valid book message |
+| `trades` | Every trade, with aggressor side (+1 buyer, -1 seller) |
+| `bbo` | Binance best bid and offer from bookTicker |
+
+All sizes are in coins (OKX contract sizes are converted using the contract value from instrument metadata).
+
+### How the books are validated
+
+- **Binance**: synced with the documented procedure (REST snapshot, then events from the one containing `lastUpdateId`, then `pu` must equal the previous `u`). Every later REST snapshot is replayed forward through the same events and compared with the live book's top 20 levels. Because depth quantities are absolute, the two must match exactly. The report gives the match rate.
+- **Bybit**: snapshot then deltas, with `u` required to advance by exactly one (measured on live data, not documented). A break invalidates the book until the next snapshot.
+- **OKX**: `prevSeqId` must equal the previous `seqId`. The exchange's CRC32 checksum over the top 25 levels is also verified after every message and reported as a match rate.
+- **All venues**: disconnects and stale feeds invalidate the book; crossed books after an update are counted.
+
+A book is only written while it can be trusted. Each day file opens with a full reset, so any single day replays on its own. Processing starts two hours before the requested window so books are already in sync when it begins.
+
+The tests generate a random true order book, encode it in each exchange's exact message format (including late REST snapshots, a dropped message, a disconnect and a midnight crossing), rebuild it, replay the output and compare it with the true book after every message.
 
 ---
 
@@ -102,4 +130,12 @@ It restarts automatically if Python exits. Stop it with Ctrl+C, then close the w
 .venv\Scripts\python tools\inspect_raw.py --date 2026-10-13
 ```
 
-Expected volume is roughly 1 to 3 GB per day compressed for all three venues.
+Expected volume is roughly 3 GB per day compressed for all three venues.
+
+### 5. Rebuild books
+
+```powershell
+.venv\Scripts\python -m rebuild --start 2026-10-14
+```
+
+Prints a quality report per venue and symbol (time in sync, resets, gaps, Binance snapshot cross-checks, OKX checksum match rate) and saves it to `data\clean\reports`. A full day takes roughly 20 to 30 minutes.
