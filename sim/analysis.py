@@ -49,6 +49,10 @@ def summarise(res: Result) -> dict:
         "notional_usd": round(res.notional, 2),
     }
     if not f or res.mid_v is None or not len(res.mid_v):
+        # no trades: nothing earned or lost
+        out.update(pnl_gross_usd=0.0, pnl_gross_bps=0.0, spread_captured_usd=0.0, inventory_usd=0.0)
+        for name in FEE_TIERS_BPS:
+            out[f"pnl_net_usd [{name}]"] = 0.0
         return out
     t = np.array([x.t_ns for x in f], dtype=np.int64)
     side = np.array([x.side for x in f], dtype=np.float64)

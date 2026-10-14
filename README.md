@@ -12,7 +12,7 @@ This repository grows layer by layer:
 3. **Forecasting**, in progress:
    - **Features and walk-forward evaluation** (done).
    - **Conformal prediction intervals under distribution shift** (done).
-4. Uncertainty-aware market maker, evaluated with PnL attribution and markouts.
+4. **Uncertainty-aware market maker** (done, ready for real data): forecast- and interval-driven quoting, compared against the naive quoter in the simulator.
 5. Interactive results explorer and research note.
 
 ---
@@ -145,6 +145,25 @@ Tests in `tests/test_sim.py` are small enough to check on paper: queue arithmeti
 - noise quadruples and volatility shows it: static collapses below 50%; scaled, regime and adaptive stay at 90%
 - noise triples but volatility does not show it (an unobserved shift): in minutes 1 to 3 after the shift, scaled covers about 56% while adaptive is back to about 92%; the window methods only recover after about 10 minutes; static never does
 - no look-ahead: changing outcomes that arrive after time T changes no interval set before T
+
+---
+
+## Layer 4: quoting with forecasts and their uncertainty
+
+`python -m sim.layer4 --date 2026-10-14` runs four strategies through the fill simulator over the same hours, at each latency, using the forecasts and intervals from Layer 3.
+
+| Strategy | Rule |
+|---|---|
+| join | quote at the best bid and ask (the baseline) |
+| forecast | quote one side only when the forecast is strong relative to its uncertainty, \|f\| > 0.25 w: a falling forecast pulls the bid, a rising one pulls the ask |
+| width | step back from the best price by 5 ticks per unit of rho above 1, where rho = interval width / its 10-minute typical value; withdraw both sides when rho > 2.5 |
+| full | forecast and width together |
+
+All except join also lean against inventory (2 ticks per full position limit), and quotes never cross the spread.
+
+**Clock alignment without look-ahead.** The simulator runs on the exchange clock, the forecasts on our receive clock. A strategy at simulator time t has seen Binance up to exchange time t - latency; the signal finds when our machine received that update and uses the latest forecast made by then. Limitation: forecasts reflect what reached Glasgow, so in the 10 ms and 1 ms scenarios only order timing improves, not the forecast's information.
+
+**Tests** (`tests/test_layer4.py`): the signal never returns a forecast made after the information the strategy has seen; every quoting rule (neutral, one-sided, stepping back, withdrawing, inventory lean, never crossing, position limits); and an end-to-end market where an informed trader sweeps one side 50 ms before every move: the join quoter is caught on all 200 moves, the forecast quoter with a perfect forecast on none.
 
 ---
 

@@ -33,6 +33,7 @@ class MarketData:
     b_bid_qty: np.ndarray = field(default_factory=lambda: _EMPTY_F)
     b_ask: np.ndarray = field(default_factory=lambda: _EMPTY_F)
     b_ask_qty: np.ndarray = field(default_factory=lambda: _EMPTY_F)
+    b_recv: np.ndarray = field(default_factory=lambda: _EMPTY_I)   # when we received each of those rows
 
     @classmethod
     def from_arrays(cls, d_exch, d_msg, d_kind, d_side, d_price, d_qty, t_exch, t_price, t_qty, t_side,
@@ -53,7 +54,8 @@ class MarketData:
         )
         if bbo is not None:
             md.b_exch, md.b_bid, md.b_bid_qty, md.b_ask, md.b_ask_qty = (
-                np.asarray(bbo[0], dtype=np.int64), *(np.asarray(x, dtype=np.float64) for x in bbo[1:]))
+                np.asarray(bbo[0], dtype=np.int64), *(np.asarray(x, dtype=np.float64) for x in bbo[1:5]))
+            md.b_recv = np.asarray(bbo[5], dtype=np.int64) if len(bbo) > 5 else md.b_exch.copy()
         return md
 
     @property
@@ -73,7 +75,7 @@ class MarketData:
                           self.d_qty[:n_rows], self.g_start[:g_keep], self.g_end[:g_keep],
                           self.t_exch[:n_tr], self.t_price[:n_tr], self.t_qty[:n_tr], self.t_side[:n_tr],
                           self.b_exch[:n_b], self.b_bid[:n_b], self.b_bid_qty[:n_b], self.b_ask[:n_b],
-                          self.b_ask_qty[:n_b])
+                          self.b_ask_qty[:n_b], self.b_recv[:n_b])
 
 
 def load_day(clean_root: str | Path, venue: str, symbol: str, day: str, use_bbo: bool = True) -> MarketData:
@@ -95,13 +97,13 @@ def load_day(clean_root: str | Path, venue: str, symbol: str, day: str, use_bbo:
     if use_bbo and (base / "bbo.parquet").exists():
         b = pq.read_table(base / "bbo.parquet")
         be, bp, bq = b.column("exch_ns").to_numpy(), b.column("bid_px").to_numpy(), b.column("bid_qty").to_numpy()
-        ap, aq = b.column("ask_px").to_numpy(), b.column("ask_qty").to_numpy()
+        ap, aq, br = b.column("ask_px").to_numpy(), b.column("ask_qty").to_numpy(), b.column("recv_ns").to_numpy()
         o = np.argsort(be, kind="stable")
-        be, bp, bq, ap, aq = be[o], bp[o], bq[o], ap[o], aq[o]
+        be, bp, bq, ap, aq, br = be[o], bp[o], bq[o], ap[o], aq[o], br[o]
         # Keep only rows where a best price changed: size-only updates do not move quotes or the mid.
         keep = np.ones(len(be), dtype=bool)
         keep[1:] = (bp[1:] != bp[:-1]) | (ap[1:] != ap[:-1])
-        bbo = (be[keep], bp[keep], bq[keep], ap[keep], aq[keep])
+        bbo = (be[keep], bp[keep], bq[keep], ap[keep], aq[keep], br[keep])
 
     return MarketData.from_arrays(
         exch, d.column("msg").to_numpy(), d.column("kind").to_numpy(), d.column("side").to_numpy(),
