@@ -9,7 +9,9 @@ This repository grows layer by layer:
    - **Book rebuild** (done): validated order books and normalised trades from the raw data.
    - **Fill simulator** (done, Python reference version): queue position, latency, fees, markouts.
    - C++ port of the simulator core, checked against the Python version.
-3. Short-horizon forecasts with conformal prediction intervals, tested under distribution shift.
+3. **Forecasting**, in progress:
+   - **Features and walk-forward evaluation** (done).
+   - Conformal prediction intervals, tested under distribution shift.
 4. Uncertainty-aware market maker, evaluated with PnL attribution and markouts.
 5. Interactive results explorer and research note.
 
@@ -101,6 +103,24 @@ Our orders are virtual and assumed small relative to the queues. Orders that wou
 The baseline strategy (`JoinQuoter`) quotes a fixed size at the best bid and ask and re-quotes whenever they move. It has no view on direction, so whatever it loses to informed traders shows up directly in the markouts. It is the benchmark the Layer 4 strategies must beat.
 
 Tests in `tests/test_sim.py` are small enough to check on paper: queue arithmetic after trades and cancels, the double-counting trap, cancel splitting, model ranking, a cancel losing a race to a trade at 10 ms but winning at 1 ms, post-only rejection, invalid books, and the PnL split.
+
+---
+
+## Layer 3a: features and forecasts
+
+`python -m forecast.features --dates 2026-10-14` builds one row every 100 ms for Binance BTCUSDT; `python -m forecast.evaluate --dates 2026-10-14,2026-10-15` runs the walk-forward test.
+
+**One clock: ours.** Every feature at time t uses only messages our machine had received by t, and the targets are how the Binance mid we received moved over the next 1, 5 and 30 seconds. Exchange timestamps say when something happened, not when we could have known it. A cross-venue signal built on exchange time can look predictive purely because it uses news that had not reached us yet.
+
+**Features**: best-level imbalance and microprice; 5-level depth imbalance; order flow imbalance at the best prices (Cont, Kukanov and Stoikov, 2014) over 1 s and 5 s; trade flow imbalance and trade count; past moves; spread; 30 s realised volatility; and for Bybit and OKX, their deviation from Binance relative to its 5-minute average, their recent move relative to Binance's, and their book imbalance. Rows where any book was out of sync or a feed was silent for 5 s are excluded.
+
+**Evaluation**: data is cut into 1-hour blocks; each block is predicted by models trained only on earlier blocks, with a 30-second gap so no training target overlaps the test period. Nothing is shuffled. R² is measured against predicting no change (not the sample mean, which a live system cannot know). Models: ridge regression on standardised features, and small, heavily regularised gradient-boosted trees (LightGBM). Rows 100 ms apart with targets up to 30 s long are far from independent, so results are treated as estimates over hours, not over hundreds of thousands of samples.
+
+**Tests** (`tests/test_forecast.py`):
+- no look-ahead: everything received after time T is altered, and no feature at or before T, nor any target ending before T, may change
+- signal recovery: in a synthetic market where Binance follows OKX by 2 s, the OKX feature and the out-of-sample model must find it
+- negative control: in a pure random walk, out-of-sample skill must be about zero
+- order flow imbalance against a hand-worked example
 
 ---
 
