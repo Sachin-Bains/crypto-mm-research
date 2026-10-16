@@ -30,7 +30,7 @@ COLUMNS = [("strategy", "{}"), ("latency_ms", "{:g}"), ("signal", "{:.0%}"), ("q
            ("one_sided_share", "{:.0%}"), ("requotes_per_fill", "{:.1f}"), ("fills", "{}"),
            ("adverse_1s_bps", "{:+.2f}"), ("adverse_5s_bps", "{:+.2f}"), ("markout_5s_bps", "{:+.2f}"),
            ("pnl_gross_bps", "{:+.2f}"), ("pnl_gross_usd", "{:+.2f}"), ("rebate_net_usd", "{:+.2f}"),
-           ("vs_join_usd_per_h", "{:+.2f}"), ("t_vs_join", "{:+.1f}")]
+           ("vs_ref_usd_per_h", "{:+.2f}"), ("t_vs_ref", "{:+.1f}")]
 
 
 def main() -> None:
@@ -52,6 +52,7 @@ def main() -> None:
     ap.add_argument("--theta", type=float, default=0.25)
     ap.add_argument("--depth-k", type=float, default=5.0)
     ap.add_argument("--rho-max", type=float, default=2.5)
+    ap.add_argument("--reference", default="join", help="strategy every other one is compared with, hour by hour")
     ap.add_argument("--random-off", type=float, default=0.3,
                     help="withdrawal probability for the random_off controls")
     args = ap.parse_args()
@@ -83,7 +84,8 @@ def main() -> None:
 
     rows = []
     names = args.strategies.split(",")
-    run_names = names if "join" in names else ["join"] + names   # join is always the reference
+    ref = args.reference
+    run_names = [ref] + [n for n in names if n != ref]   # the reference runs first
     for lat in [float(x) for x in args.latency_ms.split(",")]:
         L = int(lat * 1e6)
         base = None
@@ -104,10 +106,10 @@ def main() -> None:
                        requotes=strat.requotes, requotes_per_fill=strat.requotes / max(row['fills'], 1),
                        rebate_net_usd=row.get("pnl_net_usd [MM rebate (-0.5 bp)]"))
             hourly = hourly_markout_usd(res)
-            if name == "join":
+            if name == ref:
                 base = hourly
             diff, tstat, nh = paired_vs(base, hourly)
-            row.update(vs_join_usd_per_h=diff, t_vs_join=tstat, hours_compared=nh,
+            row.update(vs_ref_usd_per_h=diff, t_vs_ref=tstat, hours_compared=nh, reference=ref,
                        hourly_markout5s_usd={str(k): v for k, v in hourly.items()})
             if name not in names:
                 continue
@@ -131,7 +133,7 @@ def main() -> None:
     print("quoting: share of best-price changes at which the strategy had at least one quote out")
     print("one_sided_share: share of best-price changes at which the forecast pulled one side")
     print("requotes_per_fill: cancels of a live quote (to move or pull it) per fill; each one loses queue place")
-    print("vs_join_usd_per_h, t_vs_join: 5 s markout per hour minus join's, averaged over hours, and its")
+    print(f"vs_ref_usd_per_h, t_vs_ref: 5 s markout per hour minus {ref}'s, averaged over hours, and its")
     print("  t statistic (hours as paired blocks). |t| above about 2 is unlikely to be chance on this day.")
     print("rebate_net_usd: gross PnL plus a 0.5 bp maker rebate; other fee tiers are in the saved file")
 
