@@ -13,8 +13,16 @@ contain the outcome a share (1 - alpha) of the time. Methods:
               (calm, normal, stressed). Mondrian conformal.
   adaptive    adaptive conformal inference (Gibbs and Candes, 2021) on scaled residuals:
               the working miscoverage level alpha_t moves after every update,
-              alpha_t+1 = alpha_t + gamma * (alpha - miss rate since last update),
+              alpha_t+1 = alpha_t + gamma_h * (alpha - miss rate since last update),
               so persistent under-coverage widens intervals and over-coverage narrows them.
+              Two practical safeguards, both stated in the README:
+                * alpha_t is kept within [0, 0.5]. At 0 the interval is the widest
+                  calibration residual rather than infinite, so a burst of misses
+                  cannot switch the method off.
+                * gamma_h = gamma / sqrt(horizon_s). Feedback on an h-second forecast
+                  arrives h seconds late and misses come in long correlated runs, so a
+                  step suited to 1 s overreacts at 30 s. On the synthetic shift test,
+                  1/sqrt(h) kept fast recovery at every horizon, while 1/h was too slow.
 
 Label delay. A forecast made at t for horizon h is only scored at t + h. Every
 calibration set at time u contains only rows with t + h <= u, and the adaptive
@@ -33,16 +41,20 @@ import numpy as np
 METHODS = ("static", "rolling", "scaled", "regime", "adaptive")
 
 
-def conformal_quantile(scores: np.ndarray, alpha: float) -> float:
-    """Smallest score s such that at least ceil((n+1)(1-alpha)) of n scores are <= s."""
+def conformal_quantile(scores: np.ndarray, alpha: float, cap: bool = False) -> float:
+    """Smallest score s such that at least ceil((n+1)(1-alpha)) of n scores are <= s.
+
+    With cap=True, a rank beyond n (including alpha <= 0) returns the largest score
+    instead of infinity.
+    """
     n = len(scores)
-    if n == 0 or alpha <= 0:
+    if n == 0:
         return math.inf
     if alpha >= 1:
         return 0.0
-    k = math.ceil((n + 1) * (1 - alpha))
+    k = math.ceil((n + 1) * (1 - alpha)) if alpha > 0 else n + 1
     if k > n:
-        return math.inf
+        return float(np.max(scores)) if cap else math.inf
     return float(np.partition(scores, k - 1)[k - 1])
 
 
@@ -70,6 +82,7 @@ def intervals(t: np.ndarray, y: np.ndarray, pred: np.ndarray, scale: np.ndarray,
     starts = np.flatnonzero(np.r_[True, step[1:] != step[:-1]])
     ends = np.r_[starts[1:], n]
     alpha_t = alpha
+    gamma_h = gamma / math.sqrt(max(1.0, h_ns / 1e9))
     prev_u = None
     last = {m: math.nan for m in ("rolling", "scaled", "adaptive")}
     last_regime = None
@@ -82,10 +95,10 @@ def intervals(t: np.ndarray, y: np.ndarray, pred: np.ndarray, scale: np.ndarray,
             lo = np.searchsorted(t, prev_u - h_ns, side="right")
             hi = np.searchsorted(t, u - h_ns, side="right")
             hw = out["adaptive"][lo:hi]
-            done = ok[lo:hi] & np.isfinite(hw)
+            done = ok[lo:hi] & ~np.isnan(hw)        # an infinite interval counts as a hit
             if done.any():
                 miss = float(np.mean(r[lo:hi][done] > hw[done]))
-                alpha_t = alpha_t + gamma * (alpha - miss)
+                alpha_t = min(0.5, max(0.0, alpha_t + gamma_h * (alpha - miss)))
         prev_u = u
 
         # calibration set: outcomes known by u, within the trailing window
@@ -96,7 +109,7 @@ def intervals(t: np.ndarray, y: np.ndarray, pred: np.ndarray, scale: np.ndarray,
             rc, sc, vc = r[lo:hi][cal], s[lo:hi][cal], scale[lo:hi][cal]
             last["rolling"] = conformal_quantile(rc, alpha)
             last["scaled"] = conformal_quantile(sc, alpha)
-            last["adaptive"] = conformal_quantile(sc, alpha_t)
+            last["adaptive"] = conformal_quantile(sc, alpha_t, cap=True)
             c1, c2 = np.quantile(vc, [1 / 3, 2 / 3])
             bins = np.digitize(vc, [c1, c2])
             qs = [conformal_quantile(sc[bins == k], alpha) if (bins == k).sum() >= min_cal // 3 else last["scaled"]
@@ -117,16 +130,19 @@ def intervals(t: np.ndarray, y: np.ndarray, pred: np.ndarray, scale: np.ndarray,
 def evaluate(t: np.ndarray, y: np.ndarray, pred: np.ndarray, hw: np.ndarray, vol: np.ndarray,
              alpha: float = 0.1, bucket_ns: int = 600 * 10**9) -> dict:
     """Coverage, width and interval score, overall, by volatility regime and over time."""
-    ok = np.isfinite(y) & np.isfinite(pred) & np.isfinite(hw) & np.isfinite(vol)
+    # rows with an infinite interval are kept: they always cover, and their share is reported
+    ok = np.isfinite(y) & np.isfinite(pred) & ~np.isnan(hw) & np.isfinite(vol)
     if ok.sum() < 100:
         return {"n": int(ok.sum())}
     r, w, v, tt = np.abs(y - pred)[ok], hw[ok], vol[ok], t[ok]
     hit = r <= w
+    fin = np.isfinite(w)
     out = {
         "n": int(ok.sum()),
         "coverage": round(float(hit.mean()), 4),
-        "width_bps": round(float(np.mean(2 * w[np.isfinite(w)])), 4) if np.isfinite(w).any() else math.inf,
-        "interval_score": round(float(np.mean(2 * w + (2 / alpha) * np.maximum(0.0, r - w))), 4),
+        "share_infinite": round(float(1 - fin.mean()), 4),
+        "width_bps": round(float(np.mean(2 * w[fin])), 4) if fin.all() else math.inf,
+        "interval_score": round(float(np.mean(2 * w + (2 / alpha) * np.maximum(0.0, r - w))), 4) if fin.all() else math.inf,
     }
     q1, q2, q95 = np.quantile(v, [1 / 3, 2 / 3, 0.95])
     for name, m in (("calm", v <= q1), ("normal", (v > q1) & (v <= q2)), ("stressed", v > q2), ("top5pct_vol", v > q95)):

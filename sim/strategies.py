@@ -74,7 +74,7 @@ class ForecastQuoter(Strategy):
         self.theta, self.depth_k, self.max_depth, self.rho_max, self.inv_k = theta, depth_k, max_depth, rho_max, inv_k
         self.pos = 0.0
         self.live: dict[int, tuple[int, float] | None] = {BID: None, ASK: None}
-        self.calls = self.quoting = self.withdrawn = self.one_sided = 0
+        self.calls = self.quoting = self.withdrawn = self.one_sided = self.no_signal = 0
 
     def _round(self, px: float) -> float:
         return round(round(px / self.tick) * self.tick, 10)
@@ -83,6 +83,7 @@ class ForecastQuoter(Strategy):
         sig = self.signal.at(t - self.L)
         want: dict[int, float | None] = {BID: None, ASK: None}
         if sig is None:
+            self.no_signal += 1
             return want
         f, w, rho = sig
         if self.use_width and rho > self.rho_max:

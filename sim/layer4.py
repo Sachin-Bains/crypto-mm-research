@@ -26,7 +26,7 @@ from .engine import QUEUE, Engine
 from .signal import Signal
 from .strategies import VARIANTS, ForecastQuoter
 
-COLUMNS = [("strategy", "{}"), ("latency_ms", "{:g}"), ("quoting", "{:.0%}"), ("fills", "{}"),
+COLUMNS = [("strategy", "{}"), ("latency_ms", "{:g}"), ("signal", "{:.0%}"), ("quoting", "{:.0%}"), ("fills", "{}"),
            ("adverse_1s_bps", "{:+.2f}"), ("adverse_5s_bps", "{:+.2f}"), ("markout_5s_bps", "{:+.2f}"),
            ("pnl_gross_bps", "{:+.2f}"), ("pnl_gross_usd", "{:+.2f}"), ("rebate_net_usd", "{:+.2f}")]
 
@@ -65,8 +65,15 @@ def main() -> None:
     win = signal.window()
     if win is None:
         raise SystemExit("No forecasts with intervals in that file")
+    day_lo, day_hi = int(md.b_recv.min()), int(md.b_recv.max())
+    in_day = (signal.t >= day_lo) & (signal.t <= day_hi)
+    usable = in_day & np.isfinite(signal.f) & np.isfinite(signal.w)
+    hours = usable.sum() * 0.1 / 3600
     print(f"binance BTCUSDT {args.date}: forecasts {args.model} {tg}, intervals {args.method}; "
-          f"forecast window {(win[1] - win[0]) / 3.6e12:.1f} h")
+          f"usable forecasts on this day: {hours:.1f} h of {in_day.sum() * 0.1 / 3600:.1f} h")
+    if hours < 0.5:
+        raise SystemExit("Fewer than 30 minutes of usable forecasts on this day: check the intervals file "
+                         "(dates, method) before running the simulator.")
 
     rows = []
     for lat in [float(x) for x in args.latency_ms.split(",")]:
@@ -79,7 +86,8 @@ def main() -> None:
             t0 = time.time()
             res = Engine(md, strat, L, args.fill_model).run()
             row = summarise(res)
-            row.update(strategy=name, quoting=strat.quoting / max(strat.calls, 1),
+            row.update(strategy=name, signal=1 - strat.no_signal / max(strat.calls, 1),
+                       quoting=strat.quoting / max(strat.calls, 1),
                        withdrawn_share=strat.withdrawn / max(strat.calls, 1),
                        one_sided_share=strat.one_sided / max(strat.calls, 1),
                        rebate_net_usd=row.get("pnl_net_usd [MM rebate (-0.5 bp)]"))
@@ -97,7 +105,8 @@ def main() -> None:
             except (TypeError, ValueError):
                 cells.append(str(v))
         print("".join(f"{c:>16}" for c in cells))
-    print("\nquoting: share of best-price changes at which the strategy had at least one quote out")
+    print("\nsignal: share of best-price changes at which a usable forecast existed")
+    print("quoting: share of best-price changes at which the strategy had at least one quote out")
     print("rebate_net_usd: gross PnL plus a 0.5 bp maker rebate; other fee tiers are in the saved file")
 
     out = Path("data/results")

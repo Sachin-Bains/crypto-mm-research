@@ -21,7 +21,7 @@ import pyarrow.parquet as pq
 from .conformal import METHODS, evaluate, intervals
 from .features import HORIZONS_S
 
-COLS = [("coverage", "{:.1%}"), ("width_bps", "{:.2f}"), ("interval_score", "{:.2f}"), ("cov_calm", "{:.1%}"),
+COLS = [("coverage", "{:.1%}"), ("share_infinite", "{:.1%}"), ("width_bps", "{:.2f}"), ("interval_score", "{:.2f}"), ("cov_calm", "{:.1%}"),
         ("cov_stressed", "{:.1%}"), ("cov_top5pct_vol", "{:.1%}"), ("worst_10min_cov", "{:.1%}"),
         ("share_10min_below_80", "{:.1%}")]
 
@@ -57,7 +57,8 @@ def main() -> None:
             res = evaluate(t, y, pred, hw[m], vol, alpha=args.alpha)
             report[f"{tg}/{m}"] = res
             cols[f"hw_{m}_{tg}"] = hw[m].astype(np.float32)
-            row = "".join(f"{(f.format(res[k]) if k in res and np.isfinite(res[k]) else '-'):>22}" for k, f in COLS)
+            row = "".join(f"{(f.format(res[k]) if k in res and np.isfinite(res[k]) else ('inf' if k in res else '-')):>22}"
+                          for k, f in COLS)
             print(f"{m:<10}{row}")
         cols[tg] = y.astype(np.float32)
         cols[f"pred_{tg}"] = pred.astype(np.float32)

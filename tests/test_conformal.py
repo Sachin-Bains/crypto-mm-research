@@ -71,10 +71,10 @@ def test_adaptive_recovers_from_shift_the_scale_misses():
     t, y, pred, scale, h = series(3, lambda t: np.where(t >= 2 * 3600 * S, 3.0, 1.0),
                                   lambda t: np.ones(len(t)), seed=2)
     hw = intervals(t, y, pred, scale, h)
-    # measured: 1 to 3 minutes after the shift, scaled ~56%, adaptive ~92%; static stays ~41%
+    # measured (5 s horizon): 1 to 3 minutes after the shift, scaled ~56%, adaptive ~84%; static ~41%
     shock = (t >= 2 * 3600 * S + 60 * S) & (t < 2 * 3600 * S + 180 * S)
     assert cov(y, pred, hw["scaled"], shock) < 0.7
-    assert cov(y, pred, hw["adaptive"], shock) > 0.85
+    assert cov(y, pred, hw["adaptive"], shock) > 0.8
     # once the window has refilled, both are back on target; static never recovers
     later = t >= 2 * 3600 * S + 900 * S
     assert abs(cov(y, pred, hw["scaled"], later) - 0.9) < 0.03
@@ -102,3 +102,25 @@ def test_evaluate_reports_regimes_and_windows():
     assert abs(out["coverage"] - 0.9) < 0.01
     assert out["width_bps"] == round(2 * 1.645, 4)
     assert {"cov_calm", "cov_stressed", "worst_10min_cov", "share_10min_below_80"} <= out.keys()
+
+
+def test_adaptive_never_stalls_after_a_burst_of_misses():
+    """A long burst of large errors drives the working level to its floor. The interval must stay
+    finite (capped at the widest calibration residual) and the method must recover afterwards.
+    Before the fix, infinite intervals were left out of the update, so it stayed infinite for good."""
+    burst = lambda t: np.where((t >= 2 * 3600 * S) & (t < 2 * 3600 * S + 600 * S), 20.0, 1.0)   # noqa: E731
+    t, y, pred, scale, h = series(4, burst, lambda t: np.ones(len(t)), seed=4)
+    hw = intervals(t, y, pred, scale, h)
+    live = t >= 3600 * S
+    assert np.isfinite(hw["adaptive"][live]).all()
+    later = t >= 3 * 3600 * S
+    assert abs(cov(y, pred, hw["adaptive"], later) - 0.9) < 0.03
+
+
+def test_evaluate_counts_infinite_intervals_as_covering():
+    t, y, pred, scale, h = series(1, lambda t: np.ones(len(t)), lambda t: np.ones(len(t)))
+    hw = np.full(len(t), 1.645)
+    hw[: len(t) // 2] = np.inf
+    out = evaluate(t, y, pred, hw, scale)
+    assert out["share_infinite"] == 0.5 and out["width_bps"] == math.inf
+    assert out["coverage"] > 0.94       # half always covered, half about 90%
