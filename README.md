@@ -251,3 +251,19 @@ Runs the baseline quoter on Binance BTCUSDT for all three fill models and all th
 Same day, 150 ms. Every pull variant beat join hour by hour: `full_pull` lost $849 against join's $1,290 (t = 8.5 over 16 hours, +$113 with the rebate). But every strategy here loses about 0.45 bp per fill before rebates, so any rule that trades less loses less. `full_pull` made 27% fewer fills; join simply thinned by 27% would have lost about $940. The honest comparison is therefore against join with random withdrawals at the same fill count (`random_off`, rate set with `--random-off`), and per fill (`pnl_gross_bps`, `adverse_*`), not in total dollars. No strategy is profitable before the rebate, and none at a retail fee.
 
 Control result (15 October, 150 ms, in-sample). Join withdrawing at random 30% of the time with the same inventory pull (`random_off_pull`) lost $863; `full_pull` lost $849 while making 2,000 more fills. Per fill, `full_pull` was better (gross -0.44 bp against -0.48, adverse at 1 s -0.37 against -0.39). So most of the improvement over join came from three things that need no forecast: not stepping back from the best price, pulling a side to control inventory, and trading less. The forecast and its uncertainty add a smaller improvement in fill quality, which still has to hold up on a day the settings never saw.
+
+Fill-matched control (15 October, `--random-off 0.25`, reference `random_off_pull`): 27,535 fills against `full_pull`'s 27,732. `full_pull` lost $849 against $940 before rebates (gross -0.44 bp per fill against -0.49; adverse at 1 s -0.37 against -0.40), +$4.5 per hour on the 5 s markout with t = 1.8 over the day's hours. Suggestive, not conclusive, and in-sample.
+
+### Frozen for the out-of-sample test
+
+Fixed on 16 October 2026 before any data from that day was used, and committed so the timestamp shows it. Nothing below may change after seeing the result.
+
+* Forecast: ridge, 5 s horizon, features and walk-forward settings as in Layer 3.
+* Intervals: adaptive, 90%, gamma 0.005, 10-minute window.
+* Strategies: `join`, `random_off_pull` (random withdrawal 0.25), `full_pull` (theta 0.25, rho_max 1.5, pull_at 0.4, no lean, no stepping back).
+* Latency 150 ms, queue fill model, size 0.01 BTC, position limit 0.05 BTC.
+* Test: `full_pull` against `random_off_pull`, hour by hour (`t_vs_ref`), and per fill (`pnl_gross_bps`, `adverse_1s_bps`).
+
+```
+python -m sim.layer4 --date 2026-10-16 --intervals-dates 2026-10-14,2026-10-16 --latency-ms 150 --strategies join,random_off_pull,full_pull --random-off 0.25 --reference random_off_pull --label oos
+```
