@@ -75,6 +75,7 @@ class ForecastQuoter(Strategy):
         self.pos = 0.0
         self.live: dict[int, tuple[int, float] | None] = {BID: None, ASK: None}
         self.calls = self.quoting = self.withdrawn = self.one_sided = self.no_signal = 0
+        self.requotes = 0   # cancels of a live quote to move or pull it: each one gives up queue position
 
     def _round(self, px: float) -> float:
         return round(round(px / self.tick) * self.tick, 10)
@@ -116,6 +117,7 @@ class ForecastQuoter(Strategy):
             cur, px = self.live[side], want[side]
             if cur is not None and cur[1] != px:
                 self.api.cancel(cur[0])
+                self.requotes += 1
                 self.live[side] = cur = None
             if cur is None and px is not None:
                 self.live[side] = (self.api.place(side, px, self.size), px)
@@ -140,4 +142,10 @@ VARIANTS = {
     "forecast": dict(use_forecast=True, use_width=False),
     "width": dict(use_forecast=False, use_width=True),
     "full": dict(use_forecast=True, use_width=True),
+    # ablations: the variants above also differ from join by the inventory skew (inv_k = 2),
+    # so these separate the effect of each component
+    "join_skew": dict(use_forecast=False, use_width=False),
+    "forecast_noskew": dict(use_forecast=True, use_width=False, inv_k=0.0),
+    "width_noskew": dict(use_forecast=False, use_width=True, inv_k=0.0),
 }
+DEFAULT_SET = ("join", "forecast", "width", "full")
