@@ -60,6 +60,13 @@ class ForecastQuoter(Strategy):
                     withdraw both sides when rho > rho_max.
       inv_k         lean against inventory: both quotes move inv_k ticks per full
                     position limit, so a long position quotes lower and sells sooner.
+      pull_at       alternative inventory control: at pull_at of the limit, stop quoting
+                    the side that would add to the position, and keep the other at the touch.
+
+    In a market whose spread is one tick (BTCUSDT perpetual), a quote one tick behind the
+    best price is only filled when the price moves through it, which is the most adversely
+    selected fill there is. So "step back" rules (the lean, the width depth) are expected to
+    hurt there, and "pull" rules are the alternative.
 
     With everything off it behaves like JoinQuoter, but only quotes while a
     forecast exists, so all variants are compared over the same hours.
@@ -67,11 +74,13 @@ class ForecastQuoter(Strategy):
 
     def __init__(self, signal, latency_ns: int, size: float = 0.01, max_pos: float = 0.05, tick: float = 0.1,
                  use_forecast: bool = True, use_width: bool = True, theta: float = 0.25,
-                 depth_k: float = 5.0, max_depth: int = 20, rho_max: float = 2.5, inv_k: float = 2.0) -> None:
+                 depth_k: float = 5.0, max_depth: int = 20, rho_max: float = 2.5, inv_k: float = 2.0,
+                 pull_at: float | None = None) -> None:
         self.signal, self.L = signal, latency_ns
         self.size, self.max_pos, self.tick = size, max_pos, tick
         self.use_forecast, self.use_width = use_forecast, use_width
         self.theta, self.depth_k, self.max_depth, self.rho_max, self.inv_k = theta, depth_k, max_depth, rho_max, inv_k
+        self.pull_at = pull_at
         self.pos = 0.0
         self.live: dict[int, tuple[int, float] | None] = {BID: None, ASK: None}
         self.calls = self.quoting = self.withdrawn = self.one_sided = self.no_signal = 0
@@ -102,6 +111,13 @@ class ForecastQuoter(Strategy):
         if self.use_forecast and w > 0 and abs(f) > self.theta * w:
             want[BID if f < 0 else ASK] = None
             self.one_sided += 1
+        if self.pull_at is not None:
+            # inventory control by pulling, not stepping back: once the position reaches
+            # pull_at of the limit, stop quoting the side that would add to it
+            if self.pos >= self.pull_at * self.max_pos - 1e-12:
+                want[BID] = None
+            if self.pos <= -self.pull_at * self.max_pos + 1e-12:
+                want[ASK] = None
         if self.pos + self.size > self.max_pos + 1e-12:
             want[BID] = None
         if self.pos - self.size < -self.max_pos - 1e-12:
@@ -147,5 +163,10 @@ VARIANTS = {
     "join_skew": dict(use_forecast=False, use_width=False),
     "forecast_noskew": dict(use_forecast=True, use_width=False, inv_k=0.0),
     "width_noskew": dict(use_forecast=False, use_width=True, inv_k=0.0),
+    # pull instead of stepping back
+    "join_pull": dict(use_forecast=False, use_width=False, inv_k=0.0, pull_at=0.4),
+    "forecast_pull": dict(use_forecast=True, use_width=False, inv_k=0.0, pull_at=0.4),
+    "width_pull": dict(use_forecast=False, use_width=True, inv_k=0.0, depth_k=0.0, rho_max=1.5),
+    "full_pull": dict(use_forecast=True, use_width=True, inv_k=0.0, depth_k=0.0, rho_max=1.5, pull_at=0.4),
 }
 DEFAULT_SET = ("join", "forecast", "width", "full")

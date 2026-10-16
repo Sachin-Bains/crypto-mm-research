@@ -86,3 +86,35 @@ def summarise(res: Result) -> dict:
     for name, bps in FEE_TIERS_BPS.items():
         out[f"pnl_net_usd [{name}]"] = round(gross - bps * 1e-4 * res.notional, 4)
     return out
+
+
+def hourly_markout_usd(res: Result, h_s: float = 5.0) -> dict[int, float]:
+    """5 s markout in USD summed per clock hour of fill time: side * (mid(t + h) - price) * qty.
+
+    Used to compare two strategies hour by hour on the same data (a paired test with hours as
+    blocks), which accounts for fills within an hour being correlated with each other.
+    """
+    f = res.fills
+    if not f or res.mid_v is None or not len(res.mid_v):
+        return {}
+    t = np.array([x.t_ns for x in f], dtype=np.int64)
+    side = np.array([x.side for x in f], dtype=np.float64)
+    px = np.array([x.price for x in f])
+    q = np.array([x.qty for x in f])
+    mh = mid_at(res, t + int(h_s * 1e9))
+    ok = ~np.isnan(mh)
+    hour = t[ok] // (3600 * 10**9)
+    v = side[ok] * (mh[ok] - px[ok]) * q[ok]
+    return {int(k): float(v[hour == k].sum()) for k in np.unique(hour)}
+
+
+def paired_vs(base: dict[int, float], other: dict[int, float]) -> tuple[float, float, int]:
+    """Mean hourly difference (other - base) in USD, its t statistic, and the number of hours.
+    An hour with no fills for a strategy counts as 0 USD for it."""
+    hours = sorted(set(base) | set(other))
+    if len(hours) < 2:
+        return math.nan, math.nan, len(hours)
+    d = np.array([other.get(k, 0.0) - base.get(k, 0.0) for k in hours])
+    sd = float(d.std(ddof=1))
+    t = float(d.mean() / (sd / math.sqrt(len(d)))) if sd > 0 else math.nan
+    return float(d.mean()), t, len(d)

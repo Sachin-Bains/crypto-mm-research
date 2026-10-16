@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import pyarrow.parquet as pq
 
-from .analysis import FEE_TIERS_BPS, summarise
+from .analysis import FEE_TIERS_BPS, hourly_markout_usd, paired_vs, summarise
 from .data import load_day
 from .engine import QUEUE, Engine
 from .signal import Signal
@@ -29,7 +29,8 @@ from .strategies import DEFAULT_SET, VARIANTS, ForecastQuoter
 COLUMNS = [("strategy", "{}"), ("latency_ms", "{:g}"), ("signal", "{:.0%}"), ("quoting", "{:.0%}"),
            ("one_sided_share", "{:.0%}"), ("requotes_per_fill", "{:.1f}"), ("fills", "{}"),
            ("adverse_1s_bps", "{:+.2f}"), ("adverse_5s_bps", "{:+.2f}"), ("markout_5s_bps", "{:+.2f}"),
-           ("pnl_gross_bps", "{:+.2f}"), ("pnl_gross_usd", "{:+.2f}"), ("rebate_net_usd", "{:+.2f}")]
+           ("pnl_gross_bps", "{:+.2f}"), ("pnl_gross_usd", "{:+.2f}"), ("rebate_net_usd", "{:+.2f}"),
+           ("vs_join_usd_per_h", "{:+.2f}"), ("t_vs_join", "{:+.1f}")]
 
 
 def main() -> None:
@@ -79,9 +80,12 @@ def main() -> None:
                          "(dates, method) before running the simulator.")
 
     rows = []
+    names = args.strategies.split(",")
+    run_names = names if "join" in names else ["join"] + names   # join is always the reference
     for lat in [float(x) for x in args.latency_ms.split(",")]:
         L = int(lat * 1e6)
-        for name in args.strategies.split(","):
+        base = None
+        for name in run_names:
             params = dict(size=args.size, max_pos=args.max_pos, tick=args.tick, theta=args.theta,
                           depth_k=args.depth_k, rho_max=args.rho_max)
             params.update(VARIANTS[name])
@@ -95,24 +99,36 @@ def main() -> None:
                        one_sided_share=strat.one_sided / max(strat.calls, 1),
                        requotes=strat.requotes, requotes_per_fill=strat.requotes / max(row['fills'], 1),
                        rebate_net_usd=row.get("pnl_net_usd [MM rebate (-0.5 bp)]"))
+            hourly = hourly_markout_usd(res)
+            if name == "join":
+                base = hourly
+            diff, tstat, nh = paired_vs(base, hourly)
+            row.update(vs_join_usd_per_h=diff, t_vs_join=tstat, hours_compared=nh,
+                       hourly_markout5s_usd={str(k): v for k, v in hourly.items()})
+            if name not in names:
+                continue
             rows.append(row)
             print(f"  {name:<16} {lat:>6g} ms  {row['fills']:>6} fills  ({time.time() - t0:.0f}s)")
 
     print()
-    print("".join(f"{k:>16}" for k, _ in COLUMNS))
+    wid = [max(14, len(k) + 2) for k, _ in COLUMNS]
+    print("".join(f"{k:>{w}}" for (k, _), w in zip(COLUMNS, wid)))
     for r in rows:
         cells = []
         for k, f in COLUMNS:
             v = r.get(k)
             try:
-                cells.append(f.format(v) if v is not None else "-")
+                bad = v is None or (isinstance(v, float) and v != v)
+                cells.append("-" if bad else f.format(v))
             except (TypeError, ValueError):
                 cells.append(str(v))
-        print("".join(f"{c:>16}" for c in cells))
+        print("".join(f"{c:>{w}}" for c, w in zip(cells, wid)))
     print("\nsignal: share of best-price changes at which a usable forecast existed")
     print("quoting: share of best-price changes at which the strategy had at least one quote out")
     print("one_sided_share: share of best-price changes at which the forecast pulled one side")
     print("requotes_per_fill: cancels of a live quote (to move or pull it) per fill; each one loses queue place")
+    print("vs_join_usd_per_h, t_vs_join: 5 s markout per hour minus join's, averaged over hours, and its")
+    print("  t statistic (hours as paired blocks). |t| above about 2 is unlikely to be chance on this day.")
     print("rebate_net_usd: gross PnL plus a 0.5 bp maker rebate; other fee tiers are in the saved file")
 
     out = Path("data/results")

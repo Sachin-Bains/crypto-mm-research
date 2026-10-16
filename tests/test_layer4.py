@@ -11,7 +11,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from sim.analysis import summarise  # noqa: E402
+from sim.analysis import paired_vs, summarise  # noqa: E402
 from sim.engine import ASK, BID, QUEUE, Api, Engine  # noqa: E402
 from sim.signal import Signal  # noqa: E402
 from sim.strategies import VARIANTS, ForecastQuoter  # noqa: E402
@@ -78,6 +78,22 @@ def test_inventory_skew_and_never_crossing():
     assert quotes(pos=0.025, use_forecast=False, use_width=False) == {BID: 99.9, ASK: 100.1}
     # short: wants to quote 2 ticks higher, but the bid may not reach the ask
     assert quotes(pos=-0.05 + 0.01, use_forecast=False, use_width=False) == {BID: 100.0, ASK: 100.3}
+
+
+def test_pull_rule_drops_the_adding_side_and_keeps_the_other_at_the_touch():
+    kw = dict(use_forecast=False, use_width=False, inv_k=0.0, pull_at=0.4)
+    assert quotes(pos=0.01, **kw) == {BID: 100.0, ASK: 100.1}     # below 40% of the limit: both sides
+    assert quotes(pos=0.02, **kw) == {BID: None, ASK: 100.1}      # at 40% long: no more buying
+    assert quotes(pos=-0.02, **kw) == {BID: 100.0, ASK: None}
+
+
+def test_paired_comparison_by_hour():
+    base = {0: 10.0, 1: -5.0, 2: 0.0}
+    better = {0: 12.0, 1: -2.0, 2: 1.0}               # +2, +3, +1 per hour
+    d, t, n = paired_vs(base, better)
+    assert n == 3 and d == 2.0 and t > 3
+    d, t, n = paired_vs(base, {0: 10.0, 1: -5.0})     # hour 2 without fills counts as 0
+    assert d == 0.0 and n == 3
 
 
 def test_position_limit_stops_adding():
