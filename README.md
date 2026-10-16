@@ -244,3 +244,8 @@ Prints a quality report per venue and symbol (time in sync, resets, gaps, Binanc
 ```
 
 Runs the baseline quoter on Binance BTCUSDT for all three fill models and all three latencies, prints a summary table and saves full results to `data\results`. A full day takes roughly 10 minutes.
+
+
+### Pull result and the control it needs
+
+Same day, 150 ms. Every pull variant beat join hour by hour: `full_pull` lost $849 against join's $1,290 (t = 8.5 over 16 hours, +$113 with the rebate). But every strategy here loses about 0.45 bp per fill before rebates, so any rule that trades less loses less. `full_pull` made 27% fewer fills; join simply thinned by 27% would have lost about $940. The honest comparison is therefore against join with random withdrawals at the same fill count (`random_off`, rate set with `--random-off`), and per fill (`pnl_gross_bps`, `adverse_*`), not in total dollars. No strategy is profitable before the rebate, and none at a retail fee.

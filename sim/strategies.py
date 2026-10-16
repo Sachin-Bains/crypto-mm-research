@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import random
 
 from .engine import ASK, BID, Strategy
 
@@ -68,6 +69,10 @@ class ForecastQuoter(Strategy):
     selected fill there is. So "step back" rules (the lean, the width depth) are expected to
     hurt there, and "pull" rules are the alternative.
 
+      random_off    control: at each best-price change, withdraw both sides with this
+                    probability, using no information. A strategy that avoids losing fills
+                    must beat this at the same fill count, or it is just trading less.
+
     With everything off it behaves like JoinQuoter, but only quotes while a
     forecast exists, so all variants are compared over the same hours.
     """
@@ -75,12 +80,14 @@ class ForecastQuoter(Strategy):
     def __init__(self, signal, latency_ns: int, size: float = 0.01, max_pos: float = 0.05, tick: float = 0.1,
                  use_forecast: bool = True, use_width: bool = True, theta: float = 0.25,
                  depth_k: float = 5.0, max_depth: int = 20, rho_max: float = 2.5, inv_k: float = 2.0,
-                 pull_at: float | None = None) -> None:
+                 pull_at: float | None = None, random_off: float = 0.0, seed: int = 0) -> None:
         self.signal, self.L = signal, latency_ns
         self.size, self.max_pos, self.tick = size, max_pos, tick
         self.use_forecast, self.use_width = use_forecast, use_width
         self.theta, self.depth_k, self.max_depth, self.rho_max, self.inv_k = theta, depth_k, max_depth, rho_max, inv_k
         self.pull_at = pull_at
+        self.random_off = random_off
+        self._rng = random.Random(seed)
         self.pos = 0.0
         self.live: dict[int, tuple[int, float] | None] = {BID: None, ASK: None}
         self.calls = self.quoting = self.withdrawn = self.one_sided = self.no_signal = 0
@@ -96,6 +103,9 @@ class ForecastQuoter(Strategy):
             self.no_signal += 1
             return want
         f, w, rho = sig
+        if self.random_off > 0 and self._rng.random() < self.random_off:
+            self.withdrawn += 1       # control: withdraw at random, with no information
+            return want
         if self.use_width and rho > self.rho_max:
             self.withdrawn += 1
             return want
@@ -168,5 +178,8 @@ VARIANTS = {
     "forecast_pull": dict(use_forecast=True, use_width=False, inv_k=0.0, pull_at=0.4),
     "width_pull": dict(use_forecast=False, use_width=True, inv_k=0.0, depth_k=0.0, rho_max=1.5),
     "full_pull": dict(use_forecast=True, use_width=True, inv_k=0.0, depth_k=0.0, rho_max=1.5, pull_at=0.4),
+    # controls: join with random withdrawals (rate set by --random-off) and the pull rule
+    "random_off": dict(use_forecast=False, use_width=False, inv_k=0.0),
+    "random_off_pull": dict(use_forecast=False, use_width=False, inv_k=0.0, pull_at=0.4),
 }
 DEFAULT_SET = ("join", "forecast", "width", "full")

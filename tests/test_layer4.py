@@ -96,6 +96,13 @@ def test_paired_comparison_by_hour():
     assert d == 0.0 and n == 3
 
 
+def test_random_control_withdraws_at_the_set_rate():
+    q = ForecastQuoter(Fixed(), 0, tick=0.1, use_forecast=False, use_width=False, inv_k=0.0, random_off=0.3)
+    q.bind(Api())
+    off = sum(q.desired(0, 100.0, 100.1) == {BID: None, ASK: None} for _ in range(10_000))
+    assert abs(off / 10_000 - 0.3) < 0.02
+
+
 def test_position_limit_stops_adding():
     assert quotes(pos=0.05, use_forecast=False, use_width=False)[BID] is None
 

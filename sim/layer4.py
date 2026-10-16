@@ -52,6 +52,8 @@ def main() -> None:
     ap.add_argument("--theta", type=float, default=0.25)
     ap.add_argument("--depth-k", type=float, default=5.0)
     ap.add_argument("--rho-max", type=float, default=2.5)
+    ap.add_argument("--random-off", type=float, default=0.3,
+                    help="withdrawal probability for the random_off controls")
     args = ap.parse_args()
 
     days = [d.strip() for d in (args.intervals_dates or args.date).split(",") if d.strip()]
@@ -89,6 +91,8 @@ def main() -> None:
             params = dict(size=args.size, max_pos=args.max_pos, tick=args.tick, theta=args.theta,
                           depth_k=args.depth_k, rho_max=args.rho_max)
             params.update(VARIANTS[name])
+            if name.startswith("random_off"):
+                params["random_off"] = args.random_off
             strat = ForecastQuoter(signal, L, **params)
             t0 = time.time()
             res = Engine(md, strat, L, args.fill_model).run()
