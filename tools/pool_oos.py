@@ -18,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sim.analysis import paired_vs  # noqa: E402
+from sim.analysis import paired_per_fill, paired_vs  # noqa: E402
 
 
 def main() -> None:
@@ -34,6 +34,7 @@ def main() -> None:
         raise SystemExit(f"No layer4_*_{args.label}.json files in {args.results}")
 
     hourly = {args.test: {}, args.ref: {}}
+    notional = {args.test: {}, args.ref: {}}
     tot = {}
     wins = days = 0
     print(f"{'date':<12}{'strategy':<18}{'fills':>8}{'gross_bps':>11}{'adverse_1s':>12}{'gross_usd':>12}{'t_vs_ref':>10}")
@@ -51,6 +52,7 @@ def main() -> None:
                   f"{(f'{t:+.1f}' if isinstance(t, float) and t == t else '-'):>10}")
             if name in hourly:
                 hourly[name].update({int(k): v for k, v in r.get("hourly_markout5s_usd", {}).items()})
+                notional[name].update({int(k): v for k, v in r.get("hourly_notional_usd", {}).items()})
                 a = tot.setdefault(name, [0.0, 0.0, 0])
                 a[0] += r.get("pnl_gross_usd", 0.0)
                 a[1] += r.get("notional_usd", 0.0)
@@ -65,6 +67,9 @@ def main() -> None:
         print(f"  {name:<18} fills {k:>8}   gross {g:>+10.2f} USD   {g / max(n, 1e-12) * 1e4:+.3f} bp per unit traded")
     diff, t, nh = paired_vs(hourly[args.ref], hourly[args.test])
     print(f"  {args.test} minus {args.ref}: {diff:+.2f} USD per hour (5 s markout), t = {t:+.2f} over {nh} hours")
+    if notional[args.test] and notional[args.ref]:
+        d, t, nh = paired_per_fill(hourly[args.ref], notional[args.ref], hourly[args.test], notional[args.test])
+        print(f"  per fill: {args.test} minus {args.ref}: {d:+.3f} bp (5 s markout), t = {t:+.2f} over {nh} hours")
     print(f"  days on which {args.test} was better per fill: {wins} of {days}")
 
 

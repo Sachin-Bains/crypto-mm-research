@@ -108,6 +108,32 @@ def hourly_markout_usd(res: Result, h_s: float = 5.0) -> dict[int, float]:
     return {int(k): float(v[hour == k].sum()) for k in np.unique(hour)}
 
 
+def hourly_notional_usd(res: Result, h_s: float = 5.0) -> dict[int, float]:
+    """Traded notional per clock hour, over the same fills hourly_markout_usd counts."""
+    f = res.fills
+    if not f or res.mid_v is None or not len(res.mid_v):
+        return {}
+    t = np.array([x.t_ns for x in f], dtype=np.int64)
+    n = np.array([x.price * x.qty for x in f])
+    ok = ~np.isnan(mid_at(res, t + int(h_s * 1e9)))
+    hour = t[ok] // (3600 * 10**9)
+    return {int(k): float(n[ok][hour == k].sum()) for k in np.unique(hour)}
+
+
+def paired_per_fill(base_m: dict[int, float], base_n: dict[int, float],
+                    other_m: dict[int, float], other_n: dict[int, float]) -> tuple[float, float, int]:
+    """Per-fill quality test: in each hour where both traded, 5 s markout in bp of notional,
+    other minus base; returns the mean difference (bp), its t statistic and the number of hours.
+    Unlike the dollar comparison, trading less does not improve this number."""
+    hours = sorted(k for k in set(base_n) & set(other_n) if base_n[k] > 0 and other_n[k] > 0)
+    if len(hours) < 2:
+        return math.nan, math.nan, len(hours)
+    d = np.array([1e4 * (other_m.get(k, 0.0) / other_n[k] - base_m.get(k, 0.0) / base_n[k]) for k in hours])
+    sd = float(d.std(ddof=1))
+    t = float(d.mean() / (sd / math.sqrt(len(d)))) if sd > 0 else math.nan
+    return float(d.mean()), t, len(d)
+
+
 def paired_vs(base: dict[int, float], other: dict[int, float]) -> tuple[float, float, int]:
     """Mean hourly difference (other - base) in USD, its t statistic, and the number of hours.
     An hour with no fills for a strategy counts as 0 USD for it."""

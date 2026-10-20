@@ -269,3 +269,12 @@ python -m sim.layer4 --date 2026-10-16 --intervals-dates 2026-10-14,2026-10-16 -
 ```
 
 The out-of-sample test is run on every full day recorded after the freeze (16 October onwards), one `sim.layer4 ... --label oos` run per day, then pooled with `python tools/pool_oos.py`: the hourly comparison over every hour of every day, the per-fill numbers over all fills, and the number of days on which `full_pull` was better per fill.
+
+### Out-of-sample result (16 to 18 October, frozen settings)
+
+`full_pull` against `random_off_pull` (25% withdrawal), 150 ms: better per unit traded on 3 of 3 days (pooled -0.342 bp against -0.404), lower adverse selection every day, hourly dollar comparison t = 9.3 over 63 hours. The fill counts did not stay matched out of sample (`full_pull` traded 15 to 40% less than the control), and because every strategy loses per fill, trading less flatters the dollar comparison. Two stricter checks were therefore added after seeing these results. They change no strategy setting; they only make the comparison harder to pass:
+
+* `--match full_pull` sets the control's withdrawal rate each day, by bisection, so its fill count is within 1% of `full_pull`'s.
+* `vs_ref_bps_per_fill` and `t_per_fill` compare 5 s markout per unit traded, hour by hour, which trading less cannot improve.
+
+Run with `--label oos_matched` and pooled with `python tools/pool_oos.py --label oos_matched`.

@@ -11,7 +11,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from sim.analysis import paired_vs, summarise  # noqa: E402
+from sim.analysis import paired_per_fill, paired_vs, summarise  # noqa: E402
 from sim.engine import ASK, BID, QUEUE, Api, Engine  # noqa: E402
 from sim.signal import Signal  # noqa: E402
 from sim.strategies import VARIANTS, ForecastQuoter  # noqa: E402
@@ -101,6 +101,15 @@ def test_random_control_withdraws_at_the_set_rate():
     q.bind(Api())
     off = sum(q.desired(0, 100.0, 100.1) == {BID: None, ASK: None} for _ in range(10_000))
     assert abs(off / 10_000 - 0.3) < 0.02
+
+
+def test_per_fill_test_ignores_trading_less():
+    # same quality per unit traded, half the volume: dollars differ, per-fill quality does not
+    bm, bn = {0: -10.0, 1: -20.0, 2: -15.0}, {0: 1e5, 1: 2e5, 2: 1.5e5}
+    om, on = {k: v / 2 for k, v in bm.items()}, {k: v / 2 for k, v in bn.items()}
+    assert paired_vs(bm, om)[0] > 0
+    d, t, n = paired_per_fill(bm, bn, om, on)
+    assert n == 3 and abs(d) < 1e-12
 
 
 def test_position_limit_stops_adding():
