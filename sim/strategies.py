@@ -69,6 +69,9 @@ class ForecastQuoter(Strategy):
     selected fill there is. So "step back" rules (the lean, the width depth) are expected to
     hurt there, and "pull" rules are the alternative.
 
+      vol_max       control: withdraw both sides when realised volatility (rv_30s) is above
+                    vol_max times its typical level. Same structure as the width rule, but from
+                    volatility alone, with no forecast and no conformal interval.
       random_off    control: at each best-price change, withdraw both sides with this
                     probability, using no information. A strategy that avoids losing fills
                     must beat this at the same fill count, or it is just trading less.
@@ -80,13 +83,15 @@ class ForecastQuoter(Strategy):
     def __init__(self, signal, latency_ns: int, size: float = 0.01, max_pos: float = 0.05, tick: float = 0.1,
                  use_forecast: bool = True, use_width: bool = True, theta: float = 0.25,
                  depth_k: float = 5.0, max_depth: int = 20, rho_max: float = 2.5, inv_k: float = 2.0,
-                 pull_at: float | None = None, random_off: float = 0.0, seed: int = 0) -> None:
+                 pull_at: float | None = None, random_off: float = 0.0, seed: int = 0,
+                 vol_max: float | None = None) -> None:
         self.signal, self.L = signal, latency_ns
         self.size, self.max_pos, self.tick = size, max_pos, tick
         self.use_forecast, self.use_width = use_forecast, use_width
         self.theta, self.depth_k, self.max_depth, self.rho_max, self.inv_k = theta, depth_k, max_depth, rho_max, inv_k
         self.pull_at = pull_at
         self.random_off = random_off
+        self.vol_max = vol_max
         self._rng = random.Random(seed)
         self.pos = 0.0
         self.live: dict[int, tuple[int, float] | None] = {BID: None, ASK: None}
@@ -103,6 +108,11 @@ class ForecastQuoter(Strategy):
             self.no_signal += 1
             return want
         f, w, rho = sig
+        if self.vol_max is not None:
+            vr = self.signal.vol_ratio(t - self.L)
+            if vr is None or vr > self.vol_max:
+                self.withdrawn += 1   # control: withdraw when recent volatility is high, no forecast
+                return want
         if self.random_off > 0 and self._rng.random() < self.random_off:
             self.withdrawn += 1       # control: withdraw at random, with no information
             return want
@@ -181,5 +191,7 @@ VARIANTS = {
     # controls: join with random withdrawals (rate set by --random-off) and the pull rule
     "random_off": dict(use_forecast=False, use_width=False, inv_k=0.0),
     "random_off_pull": dict(use_forecast=False, use_width=False, inv_k=0.0, pull_at=0.4),
+    # control: a plain volatility filter with the same inventory rule (threshold set by --vol-max or --match)
+    "vol_pull": dict(use_forecast=False, use_width=False, inv_k=0.0, pull_at=0.4, vol_max=1.5),
 }
 DEFAULT_SET = ("join", "forecast", "width", "full")

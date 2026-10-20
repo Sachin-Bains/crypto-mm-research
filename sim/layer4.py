@@ -56,6 +56,7 @@ def main() -> None:
     ap.add_argument("--reference", default="join", help="strategy every other one is compared with, hour by hour")
     ap.add_argument("--match", default=None,
                     help="set each random_off control's withdrawal rate so its fill count matches this strategy's")
+    ap.add_argument("--vol-max", type=float, default=None, help="threshold for vol_pull (default 1.5)")
     ap.add_argument("--random-off", type=float, default=0.3,
                     help="withdrawal probability for the random_off controls")
     args = ap.parse_args()
@@ -71,7 +72,14 @@ def main() -> None:
     md = load_day(args.clean, "binance", "BTCUSDT", args.date)
     if not md.has_bbo:
         raise SystemExit("Layer 4 needs the real-time best bid/offer (bbo.parquet)")
-    signal = Signal(sig_t, pred, hw, md.b_exch, md.b_recv)
+    vol = None
+    names_req = args.strategies.split(",")
+    if any(n.startswith("vol_") for n in names_req):
+        fo = pq.read_table(Path("data/results") / f"forecast_oos_{tag}.parquet", columns=["recv_ns", "rv_30s"])
+        ft, fv = fo.column("recv_ns").to_numpy(), fo.column("rv_30s").to_numpy().astype(np.float64)
+        idx = np.clip(np.searchsorted(ft, sig_t), 0, len(ft) - 1)
+        vol = np.where(ft[idx] == sig_t, np.maximum(fv[idx], 0.1), np.nan)   # same floor as the intervals
+    signal = Signal(sig_t, pred, hw, md.b_exch, md.b_recv, vol=vol)
     win = signal.window()
     if win is None:
         raise SystemExit("No forecasts with intervals in that file")
@@ -89,12 +97,14 @@ def main() -> None:
     names = args.strategies.split(",")
     ref = args.reference
 
-    def run_one(name: str, L: int, random_off: float):
+    def run_one(name: str, L: int, random_off: float, vol_max: float | None = None):
         params = dict(size=args.size, max_pos=args.max_pos, tick=args.tick, theta=args.theta,
                       depth_k=args.depth_k, rho_max=args.rho_max)
         params.update(VARIANTS[name])
         if name.startswith("random_off"):
             params["random_off"] = random_off
+        if name.startswith("vol_") and vol_max is not None:
+            params["vol_max"] = vol_max
         strat = ForecastQuoter(signal, L, **params)
         t0 = time.time()
         res = Engine(md, strat, L, args.fill_model).run()
@@ -106,6 +116,7 @@ def main() -> None:
                    requotes=strat.requotes, requotes_per_fill=strat.requotes / max(row["fills"], 1),
                    rebate_net_usd=row.get("pnl_net_usd [MM rebate (-0.5 bp)]"),
                    random_off=random_off if name.startswith("random_off") else None,
+                   vol_max=params.get("vol_max"),
                    seconds=round(time.time() - t0, 1))
         return row, hourly_markout_usd(res), hourly_notional_usd(res)
 
@@ -114,21 +125,28 @@ def main() -> None:
         done = {}
         order = ([args.match] if args.match else []) + [ref] + names
         for name in dict.fromkeys(order):       # unique, in order: matched strategy, reference, the rest
-            if name.startswith("random_off") and args.match:
+            if name.startswith(("random_off", "vol_")) and args.match:
                 target = done[args.match][0]["fills"]
-                lo, hi, best = 0.0, 0.95, None
-                for _ in range(8):              # bisection on the withdrawal rate
+                is_vol = name.startswith("vol_")
+                lo, hi, best = (0.5, 6.0, None) if is_vol else (0.0, 0.95, None)
+                for _ in range(10 if is_vol else 8):     # bisection on the control's one setting
                     p = 0.5 * (lo + hi)
-                    out = run_one(name, L, p)
-                    print(f"    matching {name}: rate {p:.3f} -> {out[0]['fills']} fills (target {target})")
+                    out = run_one(name, L, p, None) if not is_vol else run_one(name, L, args.random_off, p)
+                    knob = "vol_max" if is_vol else "rate"
+                    print(f"    matching {name}: {knob} {p:.3f} -> {out[0]['fills']} fills (target {target})")
                     if best is None or abs(out[0]["fills"] - target) < abs(best[0]["fills"] - target):
                         best = out
                     if abs(out[0]["fills"] - target) <= 0.01 * target:
                         break
-                    lo, hi = (p, hi) if out[0]["fills"] > target else (lo, p)
+                    too_many = out[0]["fills"] > target
+                    # more withdrawal = fewer fills: a higher rate, or a lower volatility threshold
+                    if is_vol:
+                        lo, hi = (lo, p) if too_many else (p, hi)
+                    else:
+                        lo, hi = (p, hi) if too_many else (lo, p)
                 done[name] = best
             else:
-                done[name] = run_one(name, L, args.random_off)
+                done[name] = run_one(name, L, args.random_off, args.vol_max)
             print(f"  {name:<16} {lat:>6g} ms  {done[name][0]['fills']:>6} fills  ({done[name][0]['seconds']:.0f}s)")
         bm, bn = done[ref][1], done[ref][2]
         for name in names:

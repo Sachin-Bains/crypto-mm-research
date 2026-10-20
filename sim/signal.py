@@ -25,7 +25,8 @@ import numpy as np
 class Signal:
     def __init__(self, sig_recv: np.ndarray, pred: np.ndarray, hw: np.ndarray,
                  bbo_exch: np.ndarray, bbo_recv: np.ndarray,
-                 halflife_s: float = 600.0, max_age_ns: int = 1_000_000_000) -> None:
+                 halflife_s: float = 600.0, max_age_ns: int = 1_000_000_000,
+                 vol: np.ndarray | None = None) -> None:
         order = np.argsort(sig_recv, kind="stable")
         self.t = np.asarray(sig_recv, dtype=np.int64)[order]
         self.f = np.asarray(pred, dtype=np.float64)[order]
@@ -35,13 +36,16 @@ class Signal:
         # receive time of the latest Binance update seen up to each exchange time
         self.br = np.maximum.accumulate(np.asarray(bbo_recv, dtype=np.int64)[o]) if len(o) else self.bx
         self.max_age = max_age_ns
-        self.typ = self._ewma(halflife_s)
+        self.typ = self._ewma(self.w, halflife_s)
+        # optional realised volatility on the same rows, for the volatility-filter control
+        self.v = np.asarray(vol, dtype=np.float64)[order] if vol is not None else None
+        self.vtyp = self._ewma(self.v, halflife_s) if vol is not None else None
 
-    def _ewma(self, halflife_s: float) -> np.ndarray:
+    def _ewma(self, x: np.ndarray, halflife_s: float) -> np.ndarray:
         out = np.full(len(self.t), np.nan)
         m, last_t = math.nan, None
         k = math.log(2) / (halflife_s * 1e9)
-        for i, (ti, wi) in enumerate(zip(self.t.tolist(), self.w.tolist())):
+        for i, (ti, wi) in enumerate(zip(self.t.tolist(), x.tolist())):
             if math.isfinite(wi) and wi > 0:
                 if math.isnan(m):
                     m = wi
@@ -59,15 +63,36 @@ class Signal:
             return None
         return int(self.t[ok][0]), int(self.t[ok][-1])
 
-    def at(self, seen_exch_ns: int):
-        """(forecast_bps, half_width_bps, rho) known to a strategy that has seen Binance up to
-        this exchange time, or None if no fresh, finite forecast exists."""
+    def _row(self, seen_exch_ns: int) -> int | None:
+        """Index of the latest row known to a strategy that has seen Binance up to this exchange
+        time, or None if there is none or it is stale."""
         i = int(np.searchsorted(self.bx, seen_exch_ns, side="right")) - 1
         if i < 0:
             return None
         r = int(self.br[i])
         j = int(np.searchsorted(self.t, r, side="right")) - 1
         if j < 0 or r - self.t[j] > self.max_age:
+            return None
+        return j
+
+    def vol_ratio(self, seen_exch_ns: int):
+        """Realised volatility over its causal typical level, or None (no volatility series,
+        no fresh row)."""
+        if self.v is None:
+            return None
+        j = self._row(seen_exch_ns)
+        if j is None:
+            return None
+        v, typ = self.v[j], self.vtyp[j]
+        if not (math.isfinite(v) and math.isfinite(typ)) or typ <= 0:
+            return None
+        return float(v / typ)
+
+    def at(self, seen_exch_ns: int):
+        """(forecast_bps, half_width_bps, rho) known to a strategy that has seen Binance up to
+        this exchange time, or None if no fresh, finite forecast exists."""
+        j = self._row(seen_exch_ns)
+        if j is None:
             return None
         f, w, typ = self.f[j], self.w[j], self.typ[j]
         if not (math.isfinite(f) and math.isfinite(w) and math.isfinite(typ)) or typ <= 0:

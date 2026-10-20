@@ -112,6 +112,18 @@ def test_per_fill_test_ignores_trading_less():
     assert n == 3 and abs(d) < 1e-12
 
 
+def test_volatility_ratio_is_causal_and_drives_the_vol_control():
+    bx = np.array([0, 1000]) * MS
+    sig = Signal(np.array([0, 1000]) * MS, np.zeros(2), np.ones(2), bx, bx, vol=np.array([1.0, 4.0]))
+    assert sig.vol_ratio(0) == 1.0                  # only the first value known
+    assert sig.vol_ratio(1000 * MS) > 1.5           # a jump to 4x is well above its typical level
+    assert Signal(np.array([0]) * MS, np.zeros(1), np.ones(1), bx[:1], bx[:1]).vol_ratio(0) is None
+    q = ForecastQuoter(sig, 0, tick=0.1, **VARIANTS["vol_pull"])
+    q.bind(Api())
+    assert q.desired(0, 100.0, 100.1) == {BID: 100.0, ASK: 100.1}
+    assert q.desired(1000 * MS, 100.0, 100.1) == {BID: None, ASK: None}
+
+
 def test_position_limit_stops_adding():
     assert quotes(pos=0.05, use_forecast=False, use_width=False)[BID] is None
 

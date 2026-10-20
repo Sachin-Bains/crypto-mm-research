@@ -278,3 +278,14 @@ The out-of-sample test is run on every full day recorded after the freeze (16 Oc
 * `vs_ref_bps_per_fill` and `t_per_fill` compare 5 s markout per unit traded, hour by hour, which trading less cannot improve.
 
 Run with `--label oos_matched` and pooled with `python tools/pool_oos.py --label oos_matched`.
+
+### Volatility-filter control (stated before running, 20 October 2026)
+
+`full_pull` withdraws when its interval is unusually wide, and the adaptive interval is scaled by recent volatility, so part of its gain could come from stepping away in volatile moments, which needs no forecast. `vol_pull` tests that: the same inventory rule, plus withdrawal of both sides whenever rv_30s is above `vol_max` times its typical level, with `vol_max` set each day by bisection so its fill count is within 1% of `full_pull`'s. Same three test days, same settings for `full_pull`.
+
+Reading, fixed in advance: pooled `t_per_fill` of `full_pull` against `vol_pull` above 2 means the forecasts and intervals add something beyond volatility timing; below 2 means the out-of-sample gain is explained by when volatility was high, and the note will say so.
+
+```
+python -m sim.layer4 --date 2026-10-16 --intervals-dates 2026-10-14,2026-10-18 --latency-ms 150 --strategies vol_pull,full_pull --reference vol_pull --match full_pull --label volctl
+python tools/pool_oos.py --label volctl --ref vol_pull
+```
