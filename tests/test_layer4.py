@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from sim.analysis import paired_per_fill, paired_vs, summarise  # noqa: E402
 from sim.engine import ASK, BID, QUEUE, Api, Engine  # noqa: E402
 from sim.signal import Signal  # noqa: E402
-from sim.strategies import VARIANTS, ForecastQuoter  # noqa: E402
+from sim.strategies import VARIANTS, ConformalBudgetQuoter, ForecastQuoter  # noqa: E402
 from test_sim import Script  # noqa: E402
 
 MS = 1_000_000
@@ -170,3 +170,41 @@ def test_perfect_forecast_avoids_informed_flow():
     assert out["forecast"]["pnl_gross_usd"] > out["join"]["pnl_gross_usd"]
     # measured: join is swept on all 200 moves; the forecast quoter is never caught
     assert out["join"]["fills"] == 200 and out["forecast"]["fills"] == 0
+
+
+# --------------------------------------------------------------------------- version 2
+
+def test_conformal_scores_combine_forecast_and_width():
+    # w = 1: bid score 1 - f, ask score 1 + f; threshold 1.2
+    q = ConformalBudgetQuoter(Fixed(f=0.5, w=1.0), 0, lam0=1.2)
+    q.bind(Api())
+    assert q.desired(0, 100.0, 100.1) == {BID: 100.0, ASK: None}     # rising: ask score 1.5 > 1.2
+    q = ConformalBudgetQuoter(Fixed(f=0.0, w=2.0), 0, lam0=1.2)
+    q.bind(Api())
+    assert q.desired(0, 100.0, 100.1) == {BID: None, ASK: None}      # too uncertain: both 2.0 > 1.2
+
+
+def test_conformal_threshold_tracks_the_budget():
+    """Fills that lose more than the budget make the quoter more selective, and the long-run
+    average settled loss ends up at the budget when the threshold stays inside its bounds."""
+    q = ConformalBudgetQuoter(Fixed(), 0, budget_bp=0.3, gamma=0.05, lam0=3.0)
+    q.bind(Api())
+    lam0 = q.lam
+    q.on_fill(0, 1, BID, 100.0, 0.01, True)          # bought at 100.0
+    q.desired(6 * 10**9, 99.99, 100.01)               # 5 s later mid is 100.00: loss 0
+    assert q.lam > lam0                                # better than budget: quote more
+    q.on_fill(7 * 10**9, 2, BID, 100.0, 0.01, True)
+    q.desired(13 * 10**9, 99.89, 99.91)               # mid 99.90: loss 10 bp
+    assert q.lam < lam0
+    rng = np.random.default_rng(0)
+    q = ConformalBudgetQuoter(Fixed(), 0, budget_bp=0.3, gamma=0.02, lam0=3.0)
+    q.bind(Api())
+    t = 0
+    for _ in range(20000):                            # losses depend on lam: lower lam, smaller losses
+        t += 10**9
+        q.on_fill(t, 0, BID, 100.0, 0.01, True)
+        q.pending[-1] = (t, BID, 100.0, 0.01)         # settle on the next call
+        loss = 0.25 * q.lam + rng.normal(0, 2.0)
+        q.desired(t, 100.0 - loss * 1e-2 - 0.05, 100.0 - loss * 1e-2 + 0.05)
+    r = q.report()
+    assert abs(r["realised_loss_bp"] - 0.3) < 0.02 and r["share_updates_at_bound"] < 0.01

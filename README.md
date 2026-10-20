@@ -289,3 +289,25 @@ Reading, fixed in advance: pooled `t_per_fill` of `full_pull` against `vol_pull`
 python -m sim.layer4 --date 2026-10-16 --intervals-dates 2026-10-14,2026-10-18 --latency-ms 150 --strategies vol_pull,full_pull --reference vol_pull --match full_pull --label volctl
 python tools/pool_oos.py --label volctl --ref vol_pull
 ```
+
+## Version 2: conformal market making with an adverse-selection budget
+
+`ConformalBudgetQuoter` (in `sim/strategies.py`) replaces the three hand-set rules of `full_pull` with one rule and one dial.
+
+* Score per side = the interval's worst-case adverse move against that side: `w - f` for the bid, `w + f` for the ask (bp). It combines the forecast and its uncertainty with no weights to choose.
+* A side is quoted only while its score is at or below a threshold `lam`.
+* `lam` is tuned online so the realised 5 s markout loss of the strategy's own fills stays at a budget `B` (bp per unit traded): each fill is settled 5 s later from the strategy's own view of the book, then `lam <- lam - gamma * (loss - B)`. This is the adaptive conformal inference update applied to a loss (online conformal risk control). With losses clipped to [-20, 20] bp and `lam` inside [0.5, 10], the average settled loss over N fills is within (10 - 0.5) / (gamma N) of `B` whatever the market does; the run reports how often `lam` sat on a bound, where that guarantee does not hold.
+* Inventory: the same pull rule as `full_pull`.
+
+`python -m sim.frontier` sweeps each method's one dial (random withdrawal rate, volatility threshold, budget `B`) and saves fill volume against adverse selection for every setting, so methods are compared as whole curves rather than at one setting each. `python tools/pool_frontier.py --dates ...` pools days.
+
+### Plan, stated before any real-data run (20 October 2026)
+
+Development days: 15 to 18 October (already used for version 1). `gamma` = 0.02 and the budget grid {0.1, 0.2, 0.3, 0.4} bp are fixed now and will not change after seeing development results, unless a run fails outright (for example `lam` stuck on a bound for most updates), in which case the change and its reason go here before any test-day run.
+
+Test days: the first complete days recorded after the recorder restart on 20 October (21 October onwards), pooled.
+
+Claims and how they are read:
+
+1. Budget guarantee: for every budget where `lam` sat on a bound for under 5% of updates, the pooled realised 5 s markout loss is within 0.05 bp of `B`.
+2. Frontier: at the fill volume of each conformal point, its 5 s markout per unit traded is better than the volatility filter's, interpolated along the volatility-filter curve. Reported for every budget, not only the best.
