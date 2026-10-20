@@ -267,3 +267,5 @@ Fixed on 16 October 2026 before any data from that day was used, and committed s
 ```
 python -m sim.layer4 --date 2026-10-16 --intervals-dates 2026-10-14,2026-10-16 --latency-ms 150 --strategies join,random_off_pull,full_pull --random-off 0.25 --reference random_off_pull --label oos
 ```
+
+The out-of-sample test is run on every full day recorded after the freeze (16 October onwards), one `sim.layer4 ... --label oos` run per day, then pooled with `python tools/pool_oos.py`: the hourly comparison over every hour of every day, the per-fill numbers over all fills, and the number of days on which `full_pull` was better per fill.
