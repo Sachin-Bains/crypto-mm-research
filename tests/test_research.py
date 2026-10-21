@@ -49,3 +49,12 @@ def test_signed_path_is_positive_when_price_moves_with_the_forced_flow():
     p = signed_paths(ts, mid, np.array([101 * S]), np.array([-1.0]), GRID)   # forced selling at 101 s
     i = int(np.argmin(np.abs(GRID - 5)))
     assert abs(p[0, i] - 10.0) < 1e-9                    # fell 10 bp: +10 in the forced direction
+
+
+def test_xcorr_finds_a_known_lead():
+    from research.leadlag import MAXLAG, llr, xcorr
+    rng = np.random.default_rng(0)
+    a = rng.normal(size=20000)
+    b = np.r_[np.zeros(7), a[:-7]] + 0.5 * rng.normal(size=20000)   # b copies a 7 steps (70 ms) later
+    c = xcorr(a, b)
+    assert int(np.argmax(c)) - MAXLAG == 7 and llr(c) > 1

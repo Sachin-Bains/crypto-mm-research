@@ -31,13 +31,18 @@ from .analysis import hourly_markout_usd, hourly_notional_usd, summarise
 from .data import load_day
 from .engine import QUEUE, Engine
 from .signal import Signal
-from .strategies import VARIANTS, ConformalBudgetQuoter, ForecastQuoter
+from .strategies import V3_VARIANTS, VARIANTS, ConformalBudgetQuoter, ForecastQuoter, LiquidationFeed, V3Quoter
 
 GRID = {
     "random_off_pull": [0.2, 0.35, 0.5, 0.65, 0.8],
     "vol_pull": [0.8, 1.0, 1.2, 1.5, 2.0],
     "conformal": [0.1, 0.2, 0.3, 0.4],
+    # version 3 and its two ablations (run with --only, see the README)
+    "conformal_q": [0.1, 0.2, 0.3, 0.4],
+    "conformal_l": [0.1, 0.2, 0.3, 0.4],
+    "conformal_ql": [0.1, 0.2, 0.3, 0.4],
 }
+DEFAULT = ("join", "full_pull", "random_off_pull", "vol_pull", "conformal")
 KEEP = ("fills", "notional_usd", "markout_1s_bps", "adverse_1s_bps", "markout_5s_bps", "adverse_5s_bps",
         "markout_30s_bps", "pnl_gross_bps", "pnl_gross_usd", "pnl_net_usd [MM rebate (-0.5 bp)]",
         "pnl_net_usd [retail (2.0 bp)]", "spread_captured_usd", "final_position")
@@ -61,6 +66,24 @@ def load_signal(args):
     return md, Signal(sig_t, pred, hw, md.b_exch, md.b_recv, vol=vol)
 
 
+def load_liquidations(clean: str, day: str):
+    """BTC liquidations on all three venues for the day (and the last minute of the day before)."""
+    from datetime import date, timedelta
+    ts, sd, usd = [], [], []
+    prev = (date.fromisoformat(day) - timedelta(days=1)).isoformat()
+    for d in (prev, day):
+        f = Path(clean) / "events" / d / "liquidations.parquet"
+        if not f.exists():
+            continue
+        tab = pq.read_table(f)
+        c = {k: tab.column(k).to_numpy(zero_copy_only=False) for k in tab.column_names}
+        k = (c["symbol"] == "BTC") & (c["exch_ns"] > 0) & (c["side"] != 0) & (c["qty"] > 0) & (c["price"] > 0)
+        ts.append(c["exch_ns"][k]); sd.append(c["side"][k]); usd.append(c["qty"][k] * c["price"][k])
+    if not ts:
+        return None
+    return LiquidationFeed(np.concatenate(ts), np.concatenate(sd), np.concatenate(usd))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", required=True)
@@ -82,22 +105,27 @@ def main() -> None:
     lam0 = {}
     if args.lam0_from:
         prev = json.loads((Path("data/results") / f"frontier_{args.lam0_from}.json").read_text())
-        lam0 = {p["dial"]: p["conformal"]["lam_final"] for p in prev["points"] if p["method"] == "conformal"}
-        print(f"warm start from {args.lam0_from}: " + ", ".join(f"B {k} -> lam {v:.2f}" for k, v in lam0.items()))
+        lam0 = {(p["method"], p["dial"]): p["conformal"]["lam_final"] for p in prev["points"] if "conformal" in p}
+        print(f"warm start from {args.lam0_from}: " + ", ".join(f"{k[0]} B {k[1]} -> lam {v:.2f}" for k, v in lam0.items()))
     L = int(args.latency_ms * 1e6)
     base = dict(size=0.01, max_pos=0.05, tick=0.1, theta=0.25, depth_k=5.0, rho_max=2.5)
     plan = [("join", None), ("full_pull", None)]
     for m, dials in GRID.items():
         plan += [(m, d) for d in dials]
-    if args.only:
-        keep = set(args.only.split(","))
-        plan = [p for p in plan if p[0] in keep]
+    keep = set(args.only.split(",")) if args.only else set(DEFAULT)
+    plan = [p for p in plan if p[0] in keep]
+    liq = load_liquidations(args.clean, args.date) if any(p[0].startswith("conformal_") for p in plan) else None
+    if any(p[0] in ("conformal_l", "conformal_ql") for p in plan) and liq is None:
+        raise SystemExit("version 3 needs the liquidations: run python -m research.events for this date first")
 
     points = []
     print(f"binance BTCUSDT {args.date}, {len(plan)} runs at {args.latency_ms:g} ms")
     for method, dial in plan:
         if method == "conformal":
-            strat = ConformalBudgetQuoter(signal, L, budget_bp=dial, gamma=args.gamma, lam0=lam0.get(dial, 3.0))
+            strat = ConformalBudgetQuoter(signal, L, budget_bp=dial, gamma=args.gamma, lam0=lam0.get((method, dial), 3.0))
+        elif method in V3_VARIANTS:
+            strat = V3Quoter(signal, L, liq_feed=liq, budget_bp=dial, gamma=args.gamma,
+                             lam0=lam0.get((method, dial), 3.0), **V3_VARIANTS[method])
         else:
             params = dict(base)
             params.update(VARIANTS[method])
@@ -114,11 +142,13 @@ def main() -> None:
               "one_sided_share": strat.one_sided / max(strat.calls, 1),
               "hourly_markout5s_usd": {str(k): v for k, v in hourly_markout_usd(res).items()},
               "hourly_notional_usd": {str(k): v for k, v in hourly_notional_usd(res).items()}}
-        if method == "conformal":
+        if method == "conformal" or method in V3_VARIANTS:
             pt["conformal"] = strat.report()
+            if method in V3_VARIANTS:
+                pt["conformal"]["liq_pulled_share"] = strat.liq_pulled / max(strat.calls, 1)
         points.append(pt)
         extra = ""
-        if method == "conformal":
+        if "conformal" in pt:
             r = pt["conformal"]
             extra = f"  budget {dial:.2f} -> realised {r['realised_loss_bp']:.3f} bp, lam {r['lam_final']:.2f}, at bound {r['share_updates_at_bound']:.0%}"
         print(f"  {method:<16} {str(dial):>6}  {s['fills']:>6} fills  markout 5s {s.get('markout_5s_bps', float('nan')):+.3f} bp"

@@ -346,3 +346,25 @@ Expectations written before running on real data (20 October 2026):
 2. Forced flow is less informed than voluntary flow of the same size: a smaller share of its early move is still there after 120 s.
 3. Fills from a trade through our price or the book crossing us are far more adversely selected than fills where our turn in the queue came.
 4. Fills where forced flow traded against us are the most adversely selected group.
+
+### Market study results, development days 15 to 18 October
+
+Against the expectations stated before running:
+
+1. Side conventions: 76% (Binance), 74% (Bybit) and 74% (OKX) of liquidations match the aggressor side of their venue's trades within 200 ms. Below the 80% I expected, but far from 50%, and a wrong Bybit inversion would have shown about 26%. The conventions are right; the 200 ms window also catches ordinary trades on the other side.
+2. Wrong. Forced flow does not fade more than voluntary flow. Its first-second impact is smaller (largest tercile +0.29 bp against +0.55 bp) but it keeps drifting in the forced direction (+1.36 bp at 120 s against +0.88 bp), while voluntary flow partly reverses. The bigger finding is before the liquidation: the Binance mid had already moved 4.85 bp in the forced direction over the previous 30 s (7.3 bp for the largest tercile, against about 0.3 bp before voluntary flow). Liquidations arrive at the end of a move they did not start, then the move keeps creeping on for minutes, consistent with one liquidation triggering the next.
+3. Confirmed. Fills from a trade through our price or the book crossing us are 9% of join_pull's fills and lose 0.79 to 0.88 bp at 5 s, against 0.34 bp for fills where our turn in the queue came; they carry about a fifth of all losses. Queue position matters more than anything else measured: fills that joined with almost nothing ahead (front quintile, under 0.005 BTC) broke even at 5 s and made +0.10 bp at 30 s before fees; the back quintile (over about 1 BTC ahead) lost 0.68 bp.
+4. Partly confirmed. Fills in the 10 s after a liquidation episode where the forced flow traded against us are no worse at 1 s or 5 s, but lose 0.68 bp (join_pull) and 1.09 bp (full_pull) at 30 s, against about 0.42 and 0.37 bp outside liquidations. The strategies forecast 5 s ahead, so they cannot see this.
+
+Not yet interpreted: the time for each venue's mid to make half its 5 s move after an episode (Bybit 0.95 s, OKX 1.05 s, Binance 1.20 s). The Binance mid is the real-time best bid and offer, the others are from depth updates, and exchange clocks differ, so this needs the proper lead-lag study before any claim.
+
+## Version 3 and the lead-lag study (21 October 2026)
+
+`V3Quoter` keeps version 2's budget rule and adds what the market studies found, each switchable so it can be ablated:
+
+* queue: a new order's score includes the measured cost of its queue position, 0.1 bp per e-fold of visible volume ahead above 0.002 BTC (fitted by eye to the development-day queue study: 0 bp near the front, about 0.68 bp behind 1 BTC). An order already resting at the price keeps its place.
+* liq: while net forced notional over the last 60 s is at least $100,000 in one direction, the side that flow would hit is not quoted.
+
+Frontier variants: `conformal_q` (queue only), `conformal_l` (liquidations only), `conformal_ql` (both: version 3), each over budgets 0.1 to 0.4 bp. Run with `--only conformal,conformal_q,conformal_l,conformal_ql` on development days first. The constants above (0.1, 0.002 BTC, 60 s, $100,000) come from the development studies; after the development run they are frozen and the version 3 test plan is written here before any test day is used.
+
+`python -m research.leadlag --dates ...` measures which venue's mid moves first, by hourly cross-correlation of 10 ms returns at lags up to 2 s, on both exchange timestamps (who moves first at the source) and receive timestamps (whose data reaches Glasgow first), with each exchange's clock offset and round trip from the per-minute clock samples.

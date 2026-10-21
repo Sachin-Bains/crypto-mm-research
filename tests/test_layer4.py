@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from sim.analysis import paired_per_fill, paired_vs, summarise  # noqa: E402
 from sim.engine import ASK, BID, QUEUE, Api, Engine  # noqa: E402
 from sim.signal import Signal  # noqa: E402
-from sim.strategies import VARIANTS, ConformalBudgetQuoter, ForecastQuoter  # noqa: E402
+from sim.strategies import VARIANTS, ConformalBudgetQuoter, ForecastQuoter, LiquidationFeed, V3Quoter  # noqa: E402
 from test_sim import Script  # noqa: E402
 
 MS = 1_000_000
@@ -208,3 +208,21 @@ def test_conformal_threshold_tracks_the_budget():
         q.desired(t, 100.0 - loss * 1e-2 - 0.05, 100.0 - loss * 1e-2 + 0.05)
     r = q.report()
     assert abs(r["realised_loss_bp"] - 0.3) < 0.02 and r["share_updates_at_bound"] < 0.01
+
+
+def test_v3_queue_cost_blocks_long_queues_but_keeps_a_resting_place():
+    q = V3Quoter(Fixed(f=0.0, w=1.0), 0, lam0=1.3, use_liq=False)
+    q.bind(Api())
+    q.on_book(0, 100.0, 0.002, 100.1, 2.0)          # bid queue empty, ask queue 2 BTC: cost 0.1 ln(1000) = 0.69
+    assert q.live[BID] is not None and q.live[ASK] is None
+    q.on_book(1, 100.0, 5.0, 100.1, 2.0)            # bid queue grew behind us: we keep our place
+    assert q.live[BID] is not None
+
+
+def test_v3_pulls_the_side_forced_flow_would_hit():
+    feed = LiquidationFeed(np.array([0, 10]) * 10**9, np.array([-1, -1]), np.array([80_000.0, 50_000.0]))
+    assert feed.net(10 * 10**9) == -130_000.0 and feed.net(65 * 10**9) == -50_000.0
+    q = V3Quoter(Fixed(f=0.0, w=1.0), 0, liq_feed=feed, lam0=5.0, use_queue=False)
+    q.bind(Api())
+    assert q.desired(11 * 10**9, 100.0, 100.1) == {BID: None, ASK: 100.1}   # forced selling: no bid
+    assert q.desired(80 * 10**9, 100.0, 100.1) == {BID: 100.0, ASK: 100.1}  # window passed

@@ -302,3 +302,110 @@ class ConformalBudgetQuoter(ForecastQuoter):
                 "share_updates_at_bound": round(self.at_bound / max(self.settled, 1), 4),
                 "guarantee_slack_bp": round((self.lam_hi - self.lam_lo) / (self.gamma * n), 4),
                 "trace": self.trace}
+
+
+class LiquidationFeed:
+    """Liquidations as the strategy would have seen them: net forced notional (USD, + = forced
+    buying) over a trailing window, known once it happened at the exchange (the simulator adds
+    the latency when it asks)."""
+
+    def __init__(self, t_exch: "np.ndarray", side: "np.ndarray", usd: "np.ndarray", window_s: float = 60.0) -> None:
+        import numpy as np
+        o = np.argsort(t_exch, kind="stable")
+        self.t = np.asarray(t_exch, dtype=np.int64)[o]
+        self.cum = np.r_[0.0, np.cumsum((np.asarray(side, float) * np.asarray(usd, float))[o])]
+        self.win = int(window_s * 1e9)
+        self._np = np
+
+    def net(self, seen_exch_ns: int) -> float:
+        np = self._np
+        hi = int(np.searchsorted(self.t, seen_exch_ns, side="right"))
+        lo = int(np.searchsorted(self.t, seen_exch_ns - self.win, side="right"))
+        return float(self.cum[hi] - self.cum[lo])
+
+
+class V3Quoter(ConformalBudgetQuoter):
+    """Version 3: version 2's budget rule, plus two things the market studies found.
+
+    queue  Joining a long queue costs money: on the development days the 5 s markout fell by
+           about 0.1 bp for each e-fold of volume ahead at entry (0 bp with almost nothing ahead,
+           -0.68 bp behind about 1 BTC). So a new order's score includes that measured cost,
+              q = q_slope * ln(ahead / q_ref), floored at 0,
+           where ahead is the visible size at the best price when the order would join. An order
+           already resting at the price keeps its place: no queue cost to keep it.
+    liq    Liquidations arrive at the end of a move and the price keeps drifting their way for
+           minutes. While the net forced notional over the last liq_window_s is at least liq_usd
+           in one direction, the side that forced flow would hit is not quoted (forced selling:
+           no bid; forced buying: no ask).
+
+    Constants come from the development-day studies and are fixed before any test day.
+    """
+
+    def __init__(self, signal, latency_ns: int, liq_feed: "LiquidationFeed | None" = None, use_queue: bool = True,
+                 use_liq: bool = True, q_slope: float = 0.1, q_ref_btc: float = 0.002, liq_usd: float = 100_000.0,
+                 **kw) -> None:
+        super().__init__(signal, latency_ns, **kw)
+        self.liq_feed, self.use_queue, self.use_liq = liq_feed, use_queue, use_liq
+        self.q_slope, self.q_ref, self.liq_usd = q_slope, q_ref_btc, liq_usd
+        self._bq = self._aq = 0.0
+        self.liq_pulled = 0
+
+    def on_book(self, t, bid, bid_qty, ask, ask_qty) -> None:
+        self._bq, self._aq = bid_qty, ask_qty
+        super().on_book(t, bid, bid_qty, ask, ask_qty)
+
+    def _qcost(self, side: int, px: float) -> float:
+        if not self.use_queue:
+            return 0.0
+        cur = self.live[side]
+        if cur is not None and cur[1] == px:
+            return 0.0                       # already in the queue at this price: keep the place
+        ahead = self._bq if side == BID else self._aq
+        if not (ahead > 0):
+            return 0.0
+        return max(0.0, self.q_slope * math.log(ahead / self.q_ref))
+
+    def desired(self, t, bid, ask) -> dict[int, float | None]:
+        if self.pending and math.isfinite(bid) and math.isfinite(ask):
+            self._settle(t, 0.5 * (bid + ask))
+        want: dict[int, float | None] = {BID: None, ASK: None}
+        sig = self.signal.at(t - self.L)
+        if sig is None:
+            self.no_signal += 1
+            return want
+        f, w, _ = sig
+        if self.w_ok(w):
+            b, a = self._round(bid), self._round(ask)
+            if w - f + self._qcost(BID, b) <= self.lam:
+                want[BID] = b
+            if w + f + self._qcost(ASK, a) <= self.lam:
+                want[ASK] = a
+        if self.use_liq and self.liq_feed is not None:
+            net = self.liq_feed.net(t - self.L)
+            if net <= -self.liq_usd and want[BID] is not None:
+                want[BID] = None
+                self.liq_pulled += 1
+            if net >= self.liq_usd and want[ASK] is not None:
+                want[ASK] = None
+                self.liq_pulled += 1
+        if (want[BID] is None) != (want[ASK] is None):
+            self.one_sided += 1
+        if want[BID] is None and want[ASK] is None:
+            self.withdrawn += 1
+        if self.pull_at is not None:
+            if self.pos >= self.pull_at * self.max_pos - 1e-12:
+                want[BID] = None
+            if self.pos <= -self.pull_at * self.max_pos + 1e-12:
+                want[ASK] = None
+        if self.pos + self.size > self.max_pos + 1e-12:
+            want[BID] = None
+        if self.pos - self.size < -self.max_pos - 1e-12:
+            want[ASK] = None
+        return want
+
+
+V3_VARIANTS = {
+    "conformal_q": dict(use_queue=True, use_liq=False),
+    "conformal_l": dict(use_queue=False, use_liq=True),
+    "conformal_ql": dict(use_queue=True, use_liq=True),
+}
