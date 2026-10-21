@@ -72,9 +72,18 @@ def main() -> None:
     ap.add_argument("--latency-ms", type=float, default=150)
     ap.add_argument("--gamma", type=float, default=0.02)
     ap.add_argument("--only", default=None, help="comma list of methods to run (default: all)")
+    ap.add_argument("--lam0-from", default=None,
+                    help="warm start: begin each budget's threshold where it ended in frontier_<date>.json "
+                         "(a live strategy runs continuously and would carry it over)")
+    ap.add_argument("--label", default="", help="added to the saved file name")
     args = ap.parse_args()
 
     md, signal = load_signal(args)
+    lam0 = {}
+    if args.lam0_from:
+        prev = json.loads((Path("data/results") / f"frontier_{args.lam0_from}.json").read_text())
+        lam0 = {p["dial"]: p["conformal"]["lam_final"] for p in prev["points"] if p["method"] == "conformal"}
+        print(f"warm start from {args.lam0_from}: " + ", ".join(f"B {k} -> lam {v:.2f}" for k, v in lam0.items()))
     L = int(args.latency_ms * 1e6)
     base = dict(size=0.01, max_pos=0.05, tick=0.1, theta=0.25, depth_k=5.0, rho_max=2.5)
     plan = [("join", None), ("full_pull", None)]
@@ -88,7 +97,7 @@ def main() -> None:
     print(f"binance BTCUSDT {args.date}, {len(plan)} runs at {args.latency_ms:g} ms")
     for method, dial in plan:
         if method == "conformal":
-            strat = ConformalBudgetQuoter(signal, L, budget_bp=dial, gamma=args.gamma)
+            strat = ConformalBudgetQuoter(signal, L, budget_bp=dial, gamma=args.gamma, lam0=lam0.get(dial, 3.0))
         else:
             params = dict(base)
             params.update(VARIANTS[method])
@@ -117,7 +126,7 @@ def main() -> None:
 
     out = Path("data/results")
     out.mkdir(parents=True, exist_ok=True)
-    path = out / f"frontier_{args.date}.json"
+    path = out / f"frontier_{args.date}{('_' + args.label) if args.label else ''}.json"
     path.write_text(json.dumps({"args": vars(args), "grid": GRID, "points": points}, indent=1))
     print(f"Saved to {path}")
 

@@ -19,11 +19,12 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dates", required=True)
     ap.add_argument("--results", default="data/results")
+    ap.add_argument("--label", default="")
     args = ap.parse_args()
     acc = defaultdict(lambda: {"fills": 0, "notional": 0.0, "m5": 0.0, "a1": 0.0, "gross": 0.0, "rebate": 0.0,
                                "real": 0.0, "w": 0.0})
     for d in [x.strip() for x in args.dates.split(",") if x.strip()]:
-        data = json.loads((Path(args.results) / f"frontier_{d}.json").read_text())
+        data = json.loads((Path(args.results) / f"frontier_{d}{('_' + args.label) if args.label else ''}.json").read_text())
         for p in data["points"]:
             a = acc[(p["method"], p["dial"])]
             n = p["notional_usd"] or 0.0

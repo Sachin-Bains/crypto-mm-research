@@ -311,3 +311,21 @@ Claims and how they are read:
 
 1. Budget guarantee: for every budget where `lam` sat on a bound for under 5% of updates, the pooled realised 5 s markout loss is within 0.05 bp of `B`.
 2. Frontier: at the fill volume of each conformal point, its 5 s markout per unit traded is better than the volatility filter's, interpolated along the volatility-filter curve. Reported for every budget, not only the best.
+
+### Development result and one amendment (20 October 2026, before any test day)
+
+Pooled over 15 to 18 October (development days):
+
+| Method | Notional ($m) | 5 s markout loss per unit (bp) |
+| --- | --- | --- |
+| Conformal, B = 0.1 / 0.2 / 0.3 / 0.4 | 5.2 / 11.2 / 25.1 / 46.0 | 0.180 / 0.219 / 0.286 / 0.359 |
+| Volatility filter, threshold 0.8 to 2.0 | 18.8 to 58.5 | 0.378 to 0.391 |
+| Random withdrawal, rate 0.8 to 0.2 | 13.9 to 53.0 | 0.442 to 0.400 |
+| full_pull (version 1) | 43.1 | 0.367 |
+| join | 69.6 | 0.406 |
+
+The volatility filter and random withdrawal stay near 0.38 to 0.44 bp however little they trade; the conformal quoter's loss falls as its budget tightens, and at matched volume it is below the volatility filter at every budget.
+
+Budget check: realised loss 0.178 / 0.221 / 0.294 / 0.363 bp against budgets 0.1 / 0.2 / 0.3 / 0.4. The miss at B = 0.1 is the start-up transient the guarantee allows for: each day started at lam = 3.0, far above where B = 0.1 settles (about 0.65), and with few fills per day the bound (lam_start - lam_end) / (gamma N) is about 0.06 bp. At B = 0.4 on weekend days lam reached its upper bound in 13 to 14% of updates (the strategy was below budget even quoting almost everything), so that guarantee did not apply there.
+
+Amendment, made now, before any test-day data is processed: a live strategy runs continuously, so the threshold should carry over from one day to the next. `--lam0-from <date>` starts each budget at its final threshold from an earlier frontier file. On the test days both versions are reported: cold start (as pre-registered) and warm start (amended). Claim 1 is judged on the warm start; the cold-start numbers are shown beside it.
