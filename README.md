@@ -368,3 +368,28 @@ Not yet interpreted: the time for each venue's mid to make half its 5 s move aft
 Frontier variants: `conformal_q` (queue only), `conformal_l` (liquidations only), `conformal_ql` (both: version 3), each over budgets 0.1 to 0.4 bp. Run with `--only conformal,conformal_q,conformal_l,conformal_ql` on development days first. The constants above (0.1, 0.002 BTC, 60 s, $100,000) come from the development studies; after the development run they are frozen and the version 3 test plan is written here before any test day is used.
 
 `python -m research.leadlag --dates ...` measures which venue's mid moves first, by hourly cross-correlation of 10 ms returns at lags up to 2 s, on both exchange timestamps (who moves first at the source) and receive timestamps (whose data reaches Glasgow first), with each exchange's clock offset and round trip from the per-minute clock samples.
+
+### Version 3 development result and freeze (21 October 2026, before any data from 22 October is processed)
+
+Pooled over 15 to 18 October, notional traded and 5 s markout loss per unit traded (30 s in brackets):
+
+| Budget B | version 2 | + queue cost | + liquidation guard | both |
+| --- | --- | --- | --- | --- |
+| 0.1 | $5.2m, 0.180 (0.182) | $8.2m, 0.134 (0.123) | $5.0m, 0.183 (0.204) | $8.1m, 0.133 (0.132) |
+| 0.2 | $11.2m, 0.219 (0.222) | $16.7m, 0.205 (0.217) | $11.5m, 0.218 (0.241) | $15.9m, 0.205 (0.228) |
+| 0.3 | $25.1m, 0.286 (0.327) | $29.4m, 0.286 (0.328) | $24.0m, 0.286 (0.323) | $28.2m, 0.286 (0.313) |
+| 0.4 | $46.0m, 0.359 (0.390) | $47.5m, 0.356 (0.379) | $45.4m, 0.357 (0.387) | $45.4m, 0.354 (0.378) |
+
+* The queue cost works where the strategy is selective: at B = 0.1 it traded 58% more and lost a quarter less per unit; at about $11m of volume its loss is about 0.16 bp against 0.22 bp for version 2. At B = 0.3 and 0.4 the threshold rarely binds and it changes little.
+* The liquidation guard did nothing measurable, at 5 s or at 30 s. Two reasons, both worth knowing: liquidations arrive after a large move, when the volatility-scaled interval is already wide and version 2 has already pulled back; and under a budget, any filter that removes bad fills raises the threshold and buys other fills back. Recorded as a negative result and dropped.
+
+Frozen as version 3: `conformal_q` (version 2 plus the queue cost, q_slope 0.1, q_ref 0.002 BTC), gamma 0.02, budgets {0.1, 0.2, 0.3, 0.4}.
+
+Test, on the same test days as version 2 (22 and 23 October, the first complete days after the recorder restart, not yet processed), pooled, warm start from the development run (`--lam0-from 2026-10-18_v3dev`) with the cold start shown beside it:
+
+1. At the notional of each version 3 point with B = 0.1 and 0.2, its 5 s markout loss per unit is below version 2's, interpolated along version 2's curve.
+2. The budget check from version 2 applies unchanged.
+
+### Lead-lag, first run
+
+On receive timestamps (book mids), Binance moves first: Bybit and OKX follow about 30 ms later, in 99 to 100% of hours. Bybit against OKX shows spikes every 0.1 s, which is their 100 ms book publication cadence rather than price discovery, so book mids cannot settle sub-100 ms leads for those two. The exchange-clock section came back empty because of a bug (each day's files hold a few rows from before midnight, and the day was taken from the first row); fixed, and the study now also runs on trade prices, which every venue publishes trade by trade. Clock samples: every exchange's clock reads 35 to 53 ms ahead of this laptop, consistently, so the laptop's clock is behind; the differences between exchanges (up to 18 ms) are within what round-trip asymmetry over a 250 to 330 ms round trip can produce, so they are not interpreted.

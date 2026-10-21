@@ -1,5 +1,9 @@
 """Which venue moves first: lead-lag between Binance, Bybit and OKX BTC perpetuals.
 
+Two price sources: book mids (Binance real time; Bybit and OKX books arrive in 100 ms batches,
+which shows up as spikes every 0.1 s in their curves) and last trade prices (trade by trade on
+every venue). The trade-price result is the one to read for who moves first.
+
 Usage:
   python -m research.leadlag --dates 2026-10-15,2026-10-16,2026-10-17,2026-10-18
 
@@ -35,6 +39,19 @@ STEP_NS = 10_000_000
 MAXLAG = 200                         # 200 x 10 ms = 2 s
 BOOK = {"binance": "BTCUSDT", "bybit": "BTCUSDT", "okx": "BTC-USDT-SWAP"}
 PAIRS = (("binance", "bybit"), ("binance", "okx"), ("bybit", "okx"))
+
+
+def load_trades_px(clean: Path, venue: str, day: str, clock: str):
+    """Last trade price: published trade by trade on all three venues, so no venue is held back
+    by a batched book feed (Bybit and OKX send book updates every 100 ms, Binance's best bid
+    and offer is real time)."""
+    tcol = "exch_ns" if clock == "exchange" else "recv_ns"
+    t = pq.read_table(clean / venue / BOOK[venue] / day / "trades.parquet", columns=[tcol, "price"])
+    x, m = t.column(tcol).to_numpy().astype(np.int64), t.column("price").to_numpy()
+    ok = (x > 0) & (m > 0)
+    x, m = x[ok], m[ok]
+    o = np.argsort(x, kind="stable")
+    return x[o], m[o]
 
 
 def load_mid(clean: Path, venue: str, day: str, clock: str):
@@ -116,12 +133,13 @@ def main() -> None:
     clean = Path(args.clean)
     lags_s = (np.arange(-MAXLAG, MAXLAG + 1) * STEP_NS / S).round(3)
     report = {"dates": days, "lags_s": lags_s.tolist(), "clocks": clock_offsets(clean, days), "pairs": {}}
-    for clock in ("exchange", "receive"):
+    for source, clock in (("book", "exchange"), ("book", "receive"), ("trades", "exchange"), ("trades", "receive")):
         per = {p: {"curves": [], "llr": [], "vol": []} for p in PAIRS}
+        loader = load_mid if source == "book" else load_trades_px
         for day in days:
-            mids = {v: load_mid(clean, v, day, clock) for v in BOOK}
-            x0 = mids["binance"][0]
-            d0 = int(x0[0] // (86400 * S) * 86400 * S) if len(x0) else int(np.datetime64(day, "ns").astype(np.int64))
+            mids = {v: loader(clean, v, day, clock) for v in BOOK}
+            # the day's files carry a few rows from just before midnight, so the day comes from its name
+            d0 = int(np.datetime64(day, "ns").astype(np.int64))
             for h in range(24):
                 h0 = d0 + h * 3600 * S
                 r = {v: hour_returns(*mids[v], h0) for v in BOOK}
@@ -135,7 +153,7 @@ def main() -> None:
                     per[(a, b)]["curves"].append(c)
                     per[(a, b)]["llr"].append(llr(c))
                     per[(a, b)]["vol"].append(vol)
-            print(f"{clock} clock, {day} done")
+            print(f"{source} prices, {clock} clock, {day} done")
         for (a, b), d in per.items():
             if not d["curves"]:
                 continue
@@ -147,7 +165,7 @@ def main() -> None:
                 cm = np.nanmean(C[m], axis=0)
                 by_vol[name] = {"hours": int(m.sum()), "peak_lag_s": float(lags_s[int(np.nanargmax(cm))]),
                                 "llr_median": float(np.nanmedian(R[m]))}
-            report["pairs"].setdefault(clock, {})[f"{a}->{b}"] = {
+            report["pairs"].setdefault(f"{source}, {clock} clock", {})[f"{a}->{b}"] = {
                 "hours": int(len(R)), "peak_lag_s": float(lags_s[int(np.nanargmax(mean))]), "peak_corr": float(np.nanmax(mean)),
                 "corr_at_0": float(mean[MAXLAG]), "llr_median": float(np.nanmedian(R)), "share_hours_a_leads": float(np.mean(R > 1)),
                 "by_volatility": by_vol, "curve": [round(float(x), 5) for x in mean]}
@@ -160,7 +178,7 @@ def main() -> None:
         print(f"  {v:<8} offset median {c['offset_ms_median']:+.1f} ms (IQR {c['offset_ms_iqr'][0]:+.1f} to {c['offset_ms_iqr'][1]:+.1f}), "
               f"round trip median {c['rtt_ms_median']:.0f} ms (fastest 10% {c['rtt_ms_p10']:.0f} ms), {c['n']:,} samples")
     for clock, pairs in report["pairs"].items():
-        print(f"\n{clock} clock: A->B, positive lag = A moves first")
+        print(f"\n{clock}: A->B, positive lag = A moves first")
         print(f"  {'pair':<18}{'hours':>6}{'peak lag':>10}{'corr @peak':>12}{'corr @0':>10}{'LLR':>7}{'A leads':>9}   peak lag calm / normal / volatile")
         for k, p in pairs.items():
             bv = p["by_volatility"]
