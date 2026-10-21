@@ -70,6 +70,7 @@ class Fill:
     mid: float
     ahead0: float
     wait_ns: int
+    how: str = ""          # queue: our turn in the queue came; through: a trade went through our price; cross: the book crossed us
 
 
 class Api:
@@ -179,13 +180,13 @@ class Engine:
         self._flush_actions(t)
 
     # Fills ------------------------------------------------------------------
-    def _fill(self, o: Order, x: float, t: int) -> None:
+    def _fill(self, o: Order, x: float, t: int, how: str = "") -> None:
         if x <= EPS:
             return
         x = min(x, o.rem)
         o.rem -= x
         done = o.rem <= EPS
-        self.res.fills.append(Fill(t, o.oid, o.side, o.price, x, self.mid(), o.ahead0, t - o.arrive_ns))
+        self.res.fills.append(Fill(t, o.oid, o.side, o.price, x, self.mid(), o.ahead0, t - o.arrive_ns, how))
         self.res.position += o.side * x
         self.res.cash -= o.side * x * o.price
         self.res.notional += x * o.price
@@ -197,7 +198,7 @@ class Engine:
     def _check_cross(self, t: int, bb: float, ba: float) -> None:
         for o in list(self.live.values()):
             if (o.side == BID and o.price >= ba) or (o.side == ASK and o.price <= bb):
-                self._fill(o, o.rem, t)
+                self._fill(o, o.rem, t, "cross")
 
     # Market events ----------------------------------------------------------
     def _on_trade(self, i: int) -> None:
@@ -213,15 +214,15 @@ class Engine:
                 continue
             through = p < o.price if passive == BID else p > o.price
             if through:
-                self._fill(o, o.rem, t)
+                self._fill(o, o.rem, t, "through")
             elif p == o.price:
                 if self.model == OPTIMISTIC:
-                    self._fill(o, v, t)
+                    self._fill(o, v, t, "queue")
                 elif self.model == QUEUE:
                     if v > o.ahead + EPS:
                         x = v - o.ahead
                         o.ahead = 0.0
-                        self._fill(o, x, t)
+                        self._fill(o, x, t, "queue")
                     else:
                         o.ahead -= v
 

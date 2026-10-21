@@ -329,3 +329,20 @@ The volatility filter and random withdrawal stay near 0.38 to 0.44 bp however li
 Budget check: realised loss 0.178 / 0.221 / 0.294 / 0.363 bp against budgets 0.1 / 0.2 / 0.3 / 0.4. The miss at B = 0.1 is the start-up transient the guarantee allows for: each day started at lam = 3.0, far above where B = 0.1 settles (about 0.65), and with few fills per day the bound (lam_start - lam_end) / (gamma N) is about 0.06 bp. At B = 0.4 on weekend days lam reached its upper bound in 13 to 14% of updates (the strategy was below budget even quoting almost everything), so that guarantee did not apply there.
 
 Amendment, made now, before any test-day data is processed: a live strategy runs continuously, so the threshold should carry over from one day to the next. `--lam0-from <date>` starts each budget at its final threshold from an earlier frontier file. On the test days both versions are reported: cold start (as pre-registered) and warm start (amended). Claim 1 is judged on the warm start; the cold-start numbers are shown beside it.
+
+## Market studies (research/)
+
+Studies of how this market works, using the same recordings, each feeding back into the strategy.
+
+`python -m research.events --dates ...` extracts liquidations (all three venues), mark price and funding, and the per-minute clock samples from the raw files into `data/clean/events/<date>/`. Side is normalised to the forced order: +1 buys (a short was liquidated), -1 sells. Bybit reports the liquidated position's side, so it is inverted; OKX sizes are contracts (0.01 BTC); Binance pushes at most one liquidation per symbol per second, so its counts are a lower bound.
+
+`python -m research.liquidations --dates ...` groups BTC liquidations across venues into episodes and measures the Binance mid path from 30 s before to 120 s after, signed by the forced direction; compares forced flow with voluntary aggressive flow of the same size (net aggressive Binance notional in the first 2 s, controls at least 60 s from any liquidation); checks each venue's side convention against its own trades; and compares how fast each venue's mid moves.
+
+`python -m research.queue --dates ... --intervals-dates ...` splits every simulated fill by how it happened (our turn in the queue, a trade through our price, or the book crossing us), by the volume ahead of us when we joined, by time in the queue, and by whether forced flow was trading against us in the 10 s after a liquidation.
+
+Expectations written before running on real data (20 October 2026):
+
+1. Side conventions: at least 80% of liquidations match the aggressor side of their venue's trades within 200 ms.
+2. Forced flow is less informed than voluntary flow of the same size: a smaller share of its early move is still there after 120 s.
+3. Fills from a trade through our price or the book crossing us are far more adversely selected than fills where our turn in the queue came.
+4. Fills where forced flow traded against us are the most adversely selected group.
