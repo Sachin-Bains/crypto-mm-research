@@ -393,3 +393,25 @@ Test, on the same test days as version 2 (22 and 23 October, the first complete 
 ### Lead-lag, first run
 
 On receive timestamps (book mids), Binance moves first: Bybit and OKX follow about 30 ms later, in 99 to 100% of hours. Bybit against OKX shows spikes every 0.1 s, which is their 100 ms book publication cadence rather than price discovery, so book mids cannot settle sub-100 ms leads for those two. The exchange-clock section came back empty because of a bug (each day's files hold a few rows from before midnight, and the day was taken from the first row); fixed, and the study now also runs on trade prices, which every venue publishes trade by trade. Clock samples: every exchange's clock reads 35 to 53 ms ahead of this laptop, consistently, so the laptop's clock is behind; the differences between exchanges (up to 18 ms) are within what round-trip asymmetry over a 250 to 330 ms round trip can produce, so they are not interpreted.
+
+### Lead-lag result (trade prices, 15 to 18 October, 83 hours)
+
+| Pair | At the exchange (own timestamps) | As received in Glasgow |
+| --- | --- | --- |
+| Binance then Bybit | peak +40 ms, Binance leads in 100% of hours | +10 ms, 92% of hours |
+| Binance then OKX | peak 0 ms (correlation 0.34 at zero), Binance ahead in 76% of hours | +10 ms, 93% of hours |
+| Bybit then OKX | peak -30 ms: OKX leads Bybit in 99% of hours | 0 ms |
+
+Price discovery runs Binance, then OKX, then Bybit. The clock samples put OKX's clock about 17 ms behind Binance's and Bybit's relative to this laptop, which if real would mean Binance leads OKX by about 17 ms and OKX leads Bybit by about 13 ms, a consistent chain adding up to the 40 ms Binance-Bybit gap; that correction is within the measurement's uncertainty, so it is stated as consistent, not proven. From Glasgow the leads shrink to about 10 ms because Bybit's data arrives faster here (median round trip 280 ms against 330 ms for Binance). Book prices give different peaks (Bybit and OKX publish books in 100 ms batches) and are not used for this conclusion.
+
+So the cross-venue features in the forecast are not a timing edge on Binance: Binance is first. They add information from different participants seen at about the same time. The timing edge runs the other way: a market maker quoting on Bybit has about 40 ms of warning from Binance at the source.
+
+### Test run plan (29 October 2026, before any data from 20 October onwards is processed)
+
+`tools/run_test.ps1` runs the whole test: rebuild 20 to 28 October, features, walk-forward forecasts and intervals over every recorded day, then every method on each test day, cold start and warm start (version 2 and 3 thresholds carried day to day from the development run).
+
+* Primary test, as stated before: 22 and 23 October, pooled. Claims and readings exactly as written above for version 2 and version 3.
+* Extension, stated now: the same claims on 24 to 28 October, pooled separately. Reported whether it agrees or not; it does not replace the primary result.
+* Nothing in the strategies changed since the freezes. The forecast and interval models are refit walk-forward as always (each hour trained only on earlier hours).
+* Clock note: the UK moved to GMT on 25 October, so UTC days and UK days now match; all dates here are UTC.
+* Coverage, checked before the run (hours of raw data per UTC day): 22nd 17, 23rd 24, 24th 21, 25th 4, 26th 17, 27th 4, 28th 11. The recorder had outages; only the 23rd is complete. The primary test keeps the two dates named at the freeze (22 and 23 October, 41 hours); every day is pooled by hours actually recorded, so the short days count for little. The extension pools all recorded hours of the 24th to the 28th (57 hours).
