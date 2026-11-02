@@ -25,8 +25,8 @@ Write-Host "`n=== 4/4 Strategies on the test days ==="
 $prev = "2026-10-18_v3dev"
 foreach ($d in 22..28) {
     $day = "2026-10-$d"
-    Run -m sim.frontier --date $day --intervals-dates $iv --only join,full_pull,random_off_pull,vol_pull,conformal,conformal_q
-    Run -m sim.frontier --date $day --intervals-dates $iv --only conformal,conformal_q --lam0-from $prev --label warm
+    Run -m sim.frontier --date $day --intervals-dates $iv --only "join,full_pull,random_off_pull,vol_pull,conformal,conformal_q"
+    Run -m sim.frontier --date $day --intervals-dates $iv --only "conformal,conformal_q" --lam0-from $prev --label warm
     $prev = "${day}_warm"
 }
 

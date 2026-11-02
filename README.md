@@ -415,3 +415,24 @@ So the cross-venue features in the forecast are not a timing edge on Binance: Bi
 * Nothing in the strategies changed since the freezes. The forecast and interval models are refit walk-forward as always (each hour trained only on earlier hours).
 * Clock note: the UK moved to GMT on 25 October, so UTC days and UK days now match; all dates here are UTC.
 * Coverage, checked before the run (hours of raw data per UTC day): 22nd 17, 23rd 24, 24th 21, 25th 4, 26th 17, 27th 4, 28th 11. The recorder had outages; only the 23rd is complete. The primary test keeps the two dates named at the freeze (22 and 23 October, 41 hours); every day is pooled by hours actually recorded, so the short days count for little. The extension pools all recorded hours of the 24th to the 28th (57 hours).
+
+### Test result, versions 2 and 3 (2 November 2026)
+
+`python tools/test_verdict.py --dates <days> --out data/results/verdict_<set>.json` applies every reading above to the frontier files: budget check per budget (fill-weighted realised loss, share of updates at a bound), and loss per unit at matched notional against the reference curve, linearly interpolated, extended flat outside its tested range, with an hour-block bootstrap (2,000 draws, the same hours for both methods).
+
+Primary test, 22 and 23 October (41 hours), warm start, as pre-registered:
+
+| Claim | Result |
+| --- | --- |
+| Version 2 budget, B = 0.1 / 0.2 / 0.3 | Pass: realised 0.102 / 0.202 / 0.304 bp. B = 0.4 excluded (lam at its bound in 10% of updates) |
+| Version 2 below the volatility filter at matched notional | Pass at all four budgets: -0.210, -0.118, -0.037, -0.009 bp (B = 0.4 within noise, 95% interval -0.028 to +0.005; B = 0.1, 0.2 and 0.4 lie outside the filter's tested range) |
+| Version 3 below version 2 at matched notional, B = 0.1 / 0.2 | Pass: -0.040 bp (95% -0.063 to -0.020), -0.030 bp (-0.043 to -0.018) |
+| Version 3 budget | Pass: 0.104 / 0.200 / 0.303 bp. B = 0.4 excluded (bound 10%) |
+
+Extension, 24 to 28 October (57 hours), warm start: every claim passes the same way. Version 2 budget 0.110 / 0.200 / 0.285 bp; against the volatility filter -0.175, -0.095, -0.039, -0.004 bp; version 3 against version 2 -0.039 and -0.012 bp; version 3 budget 0.097 / 0.201 / 0.284 bp.
+
+Cold start (shown beside, as pre-registered): version 2 at B = 0.1 misses by 0.051 bp (primary) and 0.059 bp (extension), the start-up transient behind the warm-start amendment. Every other budget passes cold, and every frontier comparison passes cold.
+
+Volume: at B = 0.1 version 3 traded $4.7m against $2.0m for version 2 at the same loss (0.107 against 0.108 bp). Net of a 0.5 bp maker rebate every method is positive and total profit still rises with volume (primary: join $531, version 3 B = 0.4 $500, version 3 B = 0.1 $222), so the budget should be set from the fee tier and the volume cap.
+
+Note on the log: PowerShell's transcript does not record output from native programs such as python, so `test_run_log_step4.txt` holds the commands but not the pooled tables. `tools/pool_frontier.py` and `tools/test_verdict.py` recompute everything from the JSON files.
