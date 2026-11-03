@@ -436,3 +436,14 @@ Cold start (shown beside, as pre-registered): version 2 at B = 0.1 misses by 0.0
 Volume: at B = 0.1 version 3 traded $4.7m against $2.0m for version 2 at the same loss (0.107 against 0.108 bp). Net of a 0.5 bp maker rebate every method is positive and total profit still rises with volume (primary: join $531, version 3 B = 0.4 $500, version 3 B = 0.1 $222), so the budget should be set from the fee tier and the volume cap.
 
 Note on the log: PowerShell's transcript does not record output from native programs such as python, so `test_run_log_step4.txt` holds the commands but not the pooled tables. `tools/pool_frontier.py` and `tools/test_verdict.py` recompute everything from the JSON files.
+
+### Avellaneda-Stoikov benchmark: plan (3 November 2026, before it is run on any data)
+
+The standard model a market-making desk would compare against. `AvellanedaStoikovQuoter` in `sim/strategies.py` quotes around a reservation price that leans against inventory, r = mid - q gamma sigma^2 tau, with half-spread gamma sigma^2 tau / 2 + (1/gamma) ln(1 + gamma/k). sigma^2 is estimated online from the mid (5-minute half-life), tau = 30 s, and k, the decay of market-order arrival with distance from the mid, is fitted on the development days only (`tools/calibrate_as.py --dates 2026-10-15,...,2026-10-18`). Quotes are rounded to the nearest tick and kept passive; the same size, position limit, latency and fill model as every other method. Two forms, each swept over risk aversion gamma in {0.0001, 0.0003, 0.001, 0.003, 0.01} per bp per unit:
+
+* `as`: the textbook model, spread rule and inventory lean.
+* `as_skew`: the large-tick adaptation, inventory lean only, otherwise at the touch.
+
+It uses no forecast, so it is the inventory-control benchmark. Claim, judged exactly as the version 3 claims: on the primary test days (22 and 23 October, pooled), at the notional of each version 3 point with B = 0.1 and 0.2 (warm start), version 3's 5 s markout loss per unit is below the better of the two Avellaneda-Stoikov curves, interpolated along it. The extension days (24 to 28 October) are reported separately. Expected, written now: Avellaneda-Stoikov behaves like `join` with an inventory lean, whose lean step 1 of version 1 showed is costly on a one-tick book, so it should sit on or above the random-withdrawal curve.
+
+Also exported for the write-up, not a test: three 10-minute replays of the test days (the largest liquidation burst, the busiest window, and a median one) with the book, trades, liquidations, and every quote and fill of version 3, version 2 and the volatility filter (`tools/export_replay.py --auto`).

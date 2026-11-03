@@ -31,7 +31,8 @@ from .analysis import hourly_markout_usd, hourly_notional_usd, summarise
 from .data import load_day
 from .engine import QUEUE, Engine
 from .signal import Signal
-from .strategies import V3_VARIANTS, VARIANTS, ConformalBudgetQuoter, ForecastQuoter, LiquidationFeed, V3Quoter
+from .strategies import (AS_VARIANTS, V3_VARIANTS, VARIANTS, AvellanedaStoikovQuoter, ConformalBudgetQuoter,
+                         ForecastQuoter, LiquidationFeed, V3Quoter)
 
 GRID = {
     "random_off_pull": [0.2, 0.35, 0.5, 0.65, 0.8],
@@ -41,6 +42,9 @@ GRID = {
     "conformal_q": [0.1, 0.2, 0.3, 0.4],
     "conformal_l": [0.1, 0.2, 0.3, 0.4],
     "conformal_ql": [0.1, 0.2, 0.3, 0.4],
+    # Avellaneda-Stoikov benchmark: risk aversion gamma (per bp per unit of inventory)
+    "as": [0.0001, 0.0003, 0.001, 0.003, 0.01],
+    "as_skew": [0.0001, 0.0003, 0.001, 0.003, 0.01],
 }
 DEFAULT = ("join", "full_pull", "random_off_pull", "vol_pull", "conformal")
 KEEP = ("fills", "notional_usd", "markout_1s_bps", "adverse_1s_bps", "markout_5s_bps", "adverse_5s_bps",
@@ -118,11 +122,21 @@ def main() -> None:
     if any(p[0] in ("conformal_l", "conformal_ql") for p in plan) and liq is None:
         raise SystemExit("version 3 needs the liquidations: run python -m research.events for this date first")
 
+    as_k = None
+    if any(p[0] in AS_VARIANTS for p in plan):
+        cal = Path("data/results/as_calibration.json")
+        if not cal.exists():
+            raise SystemExit("the as method needs data/results/as_calibration.json: run tools/calibrate_as.py first")
+        as_k = json.loads(cal.read_text())["k_per_bp"]
+        print(f"Avellaneda-Stoikov k = {as_k} per bp (from development days)")
+
     points = []
     print(f"binance BTCUSDT {args.date}, {len(plan)} runs at {args.latency_ms:g} ms")
     for method, dial in plan:
         if method == "conformal":
             strat = ConformalBudgetQuoter(signal, L, budget_bp=dial, gamma=args.gamma, lam0=lam0.get((method, dial), 3.0))
+        elif method in AS_VARIANTS:
+            strat = AvellanedaStoikovQuoter(signal, L, gamma=dial, k=as_k, **AS_VARIANTS[method])
         elif method in V3_VARIANTS:
             strat = V3Quoter(signal, L, liq_feed=liq, budget_bp=dial, gamma=args.gamma,
                              lam0=lam0.get((method, dial), 3.0), **V3_VARIANTS[method])
@@ -146,11 +160,15 @@ def main() -> None:
             pt["conformal"] = strat.report()
             if method in V3_VARIANTS:
                 pt["conformal"]["liq_pulled_share"] = strat.liq_pulled / max(strat.calls, 1)
+        if method in AS_VARIANTS:
+            pt["as"] = strat.report()
         points.append(pt)
         extra = ""
         if "conformal" in pt:
             r = pt["conformal"]
             extra = f"  budget {dial:.2f} -> realised {r['realised_loss_bp']:.3f} bp, lam {r['lam_final']:.2f}, at bound {r['share_updates_at_bound']:.0%}"
+        if "as" in pt:
+            extra = f"  skew {pt['as']['mean_skew_ticks']:+.2f} ticks, behind touch {pt['as']['mean_depth_behind_touch_ticks']:.2f} ticks"
         print(f"  {method:<16} {str(dial):>6}  {s['fills']:>6} fills  markout 5s {s.get('markout_5s_bps', float('nan')):+.3f} bp"
               f"  ({time.time() - t0:.0f}s){extra}")
 

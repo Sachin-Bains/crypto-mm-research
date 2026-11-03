@@ -409,3 +409,102 @@ V3_VARIANTS = {
     "conformal_l": dict(use_queue=False, use_liq=True),
     "conformal_ql": dict(use_queue=True, use_liq=True),
 }
+
+
+class AvellanedaStoikovQuoter(ForecastQuoter):
+    """Benchmark: the Avellaneda-Stoikov (2008) market maker, the standard inventory model.
+
+    It has no forecast. It sets quotes around a reservation price that leans against inventory:
+        r     = mid - q * gamma * sigma^2 * tau                      (bp from mid)
+        delta = gamma * sigma^2 * tau / 2 + (1 / gamma) * ln(1 + gamma / k)   (half-spread, bp)
+        bid   = r - delta,   ask = r + delta
+    q is inventory in units of the quote size, gamma the risk aversion (the dial, per bp per unit),
+    sigma^2 the variance rate of the mid (bp^2 per second, estimated online with a 5-minute
+    half-life), tau a fixed horizon (the infinite-horizon form used in practice), and k the decay
+    of market-order arrival with distance from the mid, lambda(delta) = A exp(-k delta), calibrated
+    on development days by tools/calibrate_as.py.
+
+    Prices are rounded to the nearest tick and kept passive (a bid never above the best
+    bid, an ask never below the best ask). On BTC the spread is one tick, so the model's half-spread
+    is usually below the tick and the quotes sit at the touch unless inventory or volatility push
+    them back.
+
+    spread=False is the large-tick adaptation: only the reservation-price lean is used, quotes are
+    otherwise at the touch. It isolates the model's inventory control from its spread rule.
+    Quotes only while a forecast exists (the forecast itself is not used), so every method is
+    compared over the same hours.
+    """
+
+    def __init__(self, signal, latency_ns: int, gamma: float = 0.001, k: float = 10.0, tau_s: float = 30.0,
+                 spread: bool = True, vol_halflife_s: float = 300.0, warmup_s: float = 60.0,
+                 size: float = 0.01, max_pos: float = 0.05, tick: float = 0.1) -> None:
+        super().__init__(signal, latency_ns, size=size, max_pos=max_pos, tick=tick,
+                         use_forecast=False, use_width=False, inv_k=0.0, pull_at=None)
+        self.gamma, self.k, self.tau, self.spread = gamma, k, tau_s, spread
+        self._kdecay = math.log(2) / (vol_halflife_s * 1e9)
+        self.warmup_s = warmup_s
+        self._num = self._den = 0.0
+        self._last_t = self._last_m = None
+        self.skew_ticks_sum = 0.0
+        self.depth_ticks_sum = 0.0
+        self.n_quotes = 0
+
+    def _update_vol(self, t: int, mid: float) -> None:
+        if self._last_t is not None and t > self._last_t and mid > 0 and self._last_m > 0:
+            dt = t - self._last_t
+            r = math.log(mid / self._last_m) * 1e4
+            d = math.exp(-self._kdecay * dt)
+            self._num = self._num * d + r * r
+            self._den = self._den * d + dt / 1e9
+        self._last_t, self._last_m = t, mid
+
+    def sigma2(self) -> float | None:
+        if self._den < self.warmup_s:
+            return None
+        return self._num / self._den
+
+    def desired(self, t, bid, ask) -> dict[int, float | None]:
+        want: dict[int, float | None] = {BID: None, ASK: None}
+        if not (math.isfinite(bid) and math.isfinite(ask)):
+            return want
+        mid = 0.5 * (bid + ask)
+        self._update_vol(t, mid)
+        if self.signal.at(t - self.L) is None:
+            self.no_signal += 1
+            return want
+        s2 = self.sigma2()
+        if s2 is None:
+            return want
+        q = self.pos / self.size
+        g = self.gamma
+        res = -q * g * s2 * self.tau
+        if self.spread:
+            delta = g * s2 * self.tau / 2 + (1.0 / g) * math.log(1.0 + g / self.k)
+        else:
+            delta = (ask - bid) / mid * 1e4 / 2
+        b_px = mid * (1 + (res - delta) / 1e4)
+        a_px = mid * (1 + (res + delta) / 1e4)
+        b = self._round(b_px)     # nearest tick: the generous choice for the benchmark
+        a = self._round(a_px)
+        b = min(b, self._round(bid))
+        a = max(a, self._round(ask))
+        want[BID], want[ASK] = b, a
+        self.n_quotes += 1
+        self.skew_ticks_sum += res / 1e4 * mid / self.tick
+        self.depth_ticks_sum += ((bid - b) + (a - ask)) / (2 * self.tick)
+        if self.pos + self.size > self.max_pos + 1e-12:
+            want[BID] = None
+        if self.pos - self.size < -self.max_pos - 1e-12:
+            want[ASK] = None
+        return want
+
+    def report(self) -> dict:
+        n = max(self.n_quotes, 1)
+        s2 = self.sigma2()
+        return {"gamma": self.gamma, "k": self.k, "tau_s": self.tau, "spread_rule": self.spread,
+                "mean_skew_ticks": round(self.skew_ticks_sum / n, 3),
+                "mean_depth_behind_touch_ticks": round(self.depth_ticks_sum / n, 3),
+                "sigma2_bp2_per_s_final": round(s2, 4) if s2 is not None else None}
+
+
+AS_VARIANTS = {"as": dict(spread=True), "as_skew": dict(spread=False)}
